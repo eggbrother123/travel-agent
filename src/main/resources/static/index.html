@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>旅行攻略生成器 · 小旅</title>
+    <title>旅行攻略生成器 · 智能小旅</title>
     <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
     <style>
         * { box-sizing: border-box; }
@@ -100,10 +100,26 @@
                     padding: 18px 24px; margin-top: 16px; }
         .tips-box h3 { font-size: 15px; color: #7a5c2e; margin: 0 0 8px; }
         .tips-box li { font-size: 14px; margin: 4px 0; }
+
+        /* ===== M4 多轮调整 ===== */
+        .adjust-box { background: #fff; border: 1px dashed #c9b8a3; border-radius: 12px;
+                      padding: 16px 22px; margin-top: 18px; }
+        .adjust-box h3 { font-size: 15px; color: #7a5c2e; margin: 0 0 10px; }
+        .adj-cid { font-size: 12px; color: #b5aea5; font-weight: normal; margin-left: 8px; }
+        .adj-row { display: flex; gap: 10px; }
+        .adj-row input { flex: 1; padding: 9px 12px; font-size: 14px;
+                         border: 1px solid #d8d2ca; border-radius: 8px; }
+        .adj-row button { padding: 9px 22px; font-size: 14px; border: none; border-radius: 8px;
+                          background: #7a5c2e; color: #fff; cursor: pointer; }
+        .adj-row button:disabled { background: #d5c4ab; cursor: not-allowed; }
+        .adj-status { font-size: 12.5px; color: #8a8580; margin-top: 8px; }
+        .day-card.changed { border-color: #b4884d; box-shadow: 0 0 0 2px #f3e4cd; }
+        .diff-badge { font-size: 11px; background: #b4884d; color: #fff;
+                      border-radius: 4px; padding: 1px 7px; vertical-align: 2px; margin-left: 6px; }
     </style>
 </head>
 <body>
-    <h1>旅行攻略生成器 <span>· travel-agent M1</span></h1>
+    <h1>旅行攻略生成器 <span>· travel-agent M4</span></h1>
 
     <div class="form-card">
         <div class="mode-row">
@@ -218,11 +234,93 @@
         /* ===== 结构化模式：拿 Itinerary JSON，渲染行程卡片 ===== */
         async function fetchStruct(q, resultDiv, statusEl, t0) {
             statusEl.textContent = '小旅规划中（等完整 JSON 生成，约 30~60s）…';
-            const resp = await fetch('/plan/struct?' + q);
+            const cid = ensureCid();
+            const resp = await fetch('/plan/struct?' + q + '&cid=' + encodeURIComponent(cid));
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const it = await resp.json();
+            currentIt = it;
             resultDiv.appendChild(renderItinerary(it));
+            resultDiv.appendChild(buildAdjustBox());
             statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+        }
+
+        /* ===== M4 多轮调整 ===== */
+        let currentIt = null;   // 当前会话最新行程（前端镜像，调试用）
+
+        // cid：浏览器会话标识（存 localStorage，刷新不丢；后端用它隔离记忆和行程状态）
+        function ensureCid() {
+            let c = localStorage.getItem('travel_cid');
+            if (!c) {
+                c = 'web-' + Math.random().toString(36).slice(2, 8);
+                localStorage.setItem('travel_cid', c);
+            }
+            return c;
+        }
+
+        function buildAdjustBox() {
+            const box = document.createElement('div');
+            box.className = 'adjust-box';
+            box.innerHTML = `
+                <h3>✏️ 调整行程 <span class="adj-cid">会话 ${ensureCid()}</span></h3>
+                <div class="adj-row">
+                    <input id="adj-input" placeholder='试试："第二天太赶了，换个轻松的" / "把博物馆换成美食"' >
+                    <button id="adj-go" onclick="adjust()">调整</button>
+                </div>
+                <div class="adj-status" id="adj-status">基于当前行程增量修改，只动你要求改的部分</div>`;
+            return box;
+        }
+
+        async function adjust() {
+            const input = document.getElementById('adj-input');
+            const req = input.value.trim();
+            if (!req) return;
+            const statusEl = document.getElementById('adj-status');
+            const btn = document.getElementById('adj-go');
+            btn.disabled = true;
+            statusEl.textContent = '小旅正在调整…';
+            const t0 = performance.now();
+            try {
+                const resp = await fetch('/plan/adjust', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cid: ensureCid(), request: req })
+                });
+                const data = await resp.json();
+                if (data.error) { statusEl.textContent = '❌ ' + data.error; return; }
+                // 局部重渲染：新旧行程 diff，变化的天高亮
+                rerenderWithDiff(currentIt, data.itinerary);
+                currentIt = data.itinerary;
+                statusEl.textContent = `调整完成（${((performance.now() - t0) / 1000).toFixed(1)}s，会话记忆 ${data['记忆条数']} 条）`;
+                input.value = '';
+            } catch (e) {
+                statusEl.textContent = '出错了：' + e.message;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // 重渲染 + diff 高亮：对比新旧行程，theme 或 spots 变了的天加 changed 样式
+        function rerenderWithDiff(oldIt, newIt) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '';
+            const wrap = renderItinerary(newIt);
+            // 给变化的天打标
+            const oldDays = oldIt ? (oldIt.dayPlans || []) : [];
+            (newIt.dayPlans || []).forEach((d, i) => {
+                const od = oldDays[i];
+                const changed = !od || od.theme !== d.theme ||
+                    JSON.stringify(od.spots || []) !== JSON.stringify(d.spots || []);
+                if (changed) {
+                    const cards = wrap.querySelectorAll('.day-card');
+                    if (cards[i]) {
+                        cards[i].classList.add('changed');
+                        const title = cards[i].querySelector('.day-title');
+                        if (title) title.innerHTML += ' <span class="diff-badge">已调整</span>';
+                    }
+                }
+            });
+            resultDiv.appendChild(wrap);
+            resultDiv.appendChild(buildAdjustBox());
         }
 
         function renderItinerary(it) {

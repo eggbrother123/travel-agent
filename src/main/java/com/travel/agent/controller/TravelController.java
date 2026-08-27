@@ -1,34 +1,49 @@
 package com.travel.agent.controller;
 
 import com.travel.agent.domain.Itinerary;
+import com.travel.agent.service.ItinerarySessionService;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 
+import java.util.Map;
+
 /**
- * 攻略生成接口，三种输出形态（M1）：
- *  /plan          纯文本 Markdown —— 人看（浏览器/前端 marked 渲染）
- *  /plan/struct   Itinerary record 树 JSON —— 机器看（前端行程卡片/存库/M4 状态管理的基础）
- *  /plan/stream   SSE 流式 —— 打字机，降感知延迟
+ * 攻略生成接口（M1~M4 演进）：
+ *  /plan          纯文本 Markdown（M0）
+ *  /plan/struct   Itinerary record 树 JSON（M1）——M4 起存入会话状态
+ *  /plan/stream   SSE 流式打字机（M1）
+ *  /plan/adjust   多轮调整（M4）：cid 会话 + 自然语言请求 → 基于当前行程增量修改
  *
- * 三者共用同一个 buildPrompt()，保证不同形态下的「输入→攻略」语义一致。
+ * M4 关键：对话记忆（ChatMemory）和行程状态（Itinerary 对象）是两回事——
+ * 记忆管"说过什么"（ Advisor 自动读写），状态管"最新攻略长什么样"（这里显式存取）。
  */
 @RestController
 public class TravelController {
 
     private final ChatClient travelChatClient;
+    private final ChatClient memoryChatClient;   // 带记忆 Advisor 的实例：多轮调整专用
+    private final ItinerarySessionService sessionService;
 
-    public TravelController(ChatClient travelChatClient) {
+    public TravelController(ChatClient travelChatClient,
+                             ItinerarySessionService sessionService) {
         this.travelChatClient = travelChatClient;
+        this.sessionService = sessionService;
+        // 带记忆的 ChatClient：复用全局默认（系统提示词+工具），叠加记忆 Advisor
+        this.memoryChatClient = travelChatClient.mutate()
+                .defaultAdvisors(MessageChatMemoryAdvisor.builder(sessionService.chatMemory()).build())
+                .build();
     }
 
-    /**
-     * M0 纯文本版（Markdown）。浏览器裸看是一坨原始符号，配 static/index.html 渲染。
-     * 试：http://localhost:8081/plan?destination=东京&days=3&budget=8000&preferences=美食,博物馆
-     */
+    /** M0 纯文本版（Markdown）。 */
     @GetMapping("/plan")
     public String plan(@RequestParam String destination,
                        @RequestParam(defaultValue = "3") int days,
@@ -41,29 +56,37 @@ public class TravelController {
     }
 
     /**
-     * M1 结构化输出：.entity(Itinerary.class) 自动生成 JSON Schema 注入 prompt，
-     * 模型按 schema 返回 JSON，框架反序列化成 record 树——AI 输出从此可被程序直接消费。
-     * 试：http://localhost:8081/plan/struct?destination=东京&days=2
-     * 观察返回的是 {"destination":"东京","days":2,...,"dayPlans":[...]} 而不是一段话。
+     * M1 结构化输出（M4 增强：cid 参数 + 行程存入会话状态，供后续 /plan/adjust 增量修改）。
+     * cid 不传则不记忆（单次使用场景不受影响）。
      */
     @GetMapping("/plan/struct")
     public Itinerary planStruct(@RequestParam String destination,
                                 @RequestParam(defaultValue = "3") int days,
                                 @RequestParam(defaultValue = "5000") double budget,
-                                @RequestParam(defaultValue = "不限") String preferences) {
-        return travelChatClient.prompt()
+                                @RequestParam(defaultValue = "不限") String preferences,
+                                @RequestParam(required = false) String cid) {
+        // 防御性结构化输出：工具调用+entity 组合下 DeepSeek 偶尔先输出思考再给 JSON（实测两种接口都踩过），
+        // 统一走 BeanOutputConverter + extractJson 剥离思考文字
+        BeanOutputConverter<Itinerary> converter = new BeanOutputConverter<>(Itinerary.class);
+        String raw = travelChatClient.prompt()
                 .user(buildPrompt(destination, days, budget, preferences)
-                        + "\n\n请以结构化的行程格式输出。")
+                        + "\n\n请以结构化的行程格式输出，" + converter.getFormat())
                 .call()
-                .entity(Itinerary.class);
+                .content();
+        Itinerary it = converter.convert(extractJson(raw));
+
+        if (cid != null && !cid.isBlank()) {
+            sessionService.saveItinerary(cid, it);
+            // 初始需求也写进对话记忆，后续调整才有上下文（"上次说的博物馆"有指代）
+            memoryChatClient.prompt()
+                    .user("（用户刚生成了" + destination + days + "日攻略，偏好：" + preferences + "，预算" + budget + "元）")
+                    .call()
+                    .content();
+        }
+        return it;
     }
 
-    /**
-     * M1 流式输出：.call() 换 .stream()，返回 Flux<String>（每个元素一小段 token），
-     * produces=text/event-stream 让浏览器以 SSE 接收——几乎立刻看到第一个字。
-     * 对比 /plan 要等全部生成完才一次性返回（3 天攻略约 30~60s，感知差距巨大）。
-     * 试：http://localhost:8081/plan/stream?destination=东京&days=1
-     */
+    /** M1 流式输出。 */
     @GetMapping(value = "/plan/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
     public Flux<String> planStream(@RequestParam String destination,
                                    @RequestParam(defaultValue = "3") int days,
@@ -73,6 +96,93 @@ public class TravelController {
                 .user(buildPrompt(destination, days, budget, preferences))
                 .stream()
                 .content();
+    }
+
+    /**
+     * M4 多轮调整：cid + 自然语言请求（"第二天太赶了，换个轻松的"）。
+     *
+     * 增量设计（省 token 的关键）：
+     *  - 把【当前行程 JSON】注入 prompt，模型不需要从对话历史里"回忆"行程
+     *  - 指示模型只输出完整的新 Itinerary（含未变化的天）——反正 record 树不大，
+     *    但上下文里不用塞 20 条历史+长攻略原文，已经是数量级的节省
+     *  - 工具仍然可用：调整涉及新查天气/景点时模型自己会调
+     */
+    @PostMapping("/plan/adjust")
+    public Map<String, Object> adjust(@RequestBody AdjustRequest req) {
+        Itinerary current = sessionService.getItinerary(req.cid());
+        if (current == null) {
+            return Map.of("error", "会话 " + req.cid() + " 没有已生成的行程，请先调 /plan/struct?cid=... 生成");
+        }
+
+        // 不用 .entity()：调整场景 prompt 里注入了大段行程 JSON，DeepSeek 偶尔会在 JSON 前
+        // 先输出思考文字（"Based on the request..."），entity 直接解析就炸（实测踩坑）。
+        // 改用 BeanOutputConverter（entity 的底层机制）+ 防御性 JSON 提取：
+        // 截取第一个 { 到最后一个 }，思考文字/代码块围栏都被剥掉。
+        BeanOutputConverter<Itinerary> converter = new BeanOutputConverter<>(Itinerary.class);
+        String raw = memoryChatClient.prompt()
+                .user("""
+                        用户对当前行程提出了调整请求：%s
+
+                        当前行程（JSON）：
+                        %s
+
+                        请根据调整请求修改行程，输出修改后的【完整】行程（未提及的天保持原样）。
+                        用户没明确要改的地方不要动。
+                        %s
+                        """.formatted(req.request(), toJson(current), converter.getFormat()))
+                .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, req.cid()))
+                .call()
+                .content();
+
+        Itinerary updated;
+        try {
+            updated = converter.convert(extractJson(raw));
+        } catch (Exception e) {
+            return Map.of("error", "行程解析失败，请换个说法再试（原始输出片段："
+                    + raw.substring(0, Math.min(120, raw.length())) + "…）");
+        }
+
+        sessionService.saveItinerary(req.cid(), updated);
+        return Map.of(
+                "cid", req.cid(),
+                "itinerary", updated,
+                "记忆条数", sessionService.memorySize(req.cid())
+        );
+    }
+
+    /** 防御性 JSON 提取：剥掉模型的前置思考/后置解释/```json 围栏，只留 JSON 本体 */
+    private String extractJson(String raw) {
+        int start = raw.indexOf('{');
+        int end = raw.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            throw new IllegalArgumentException("输出中找不到 JSON：" + raw.substring(0, Math.min(80, raw.length())));
+        }
+        return raw.substring(start, end + 1);
+    }
+
+    /** 调整请求体 */
+    public record AdjustRequest(String cid, String request) {}
+
+    /** 行程 → JSON（给 prompt 用；生产建议换 ObjectMapper 注入，这里轻量实现） */
+    private String toJson(Itinerary it) {
+        StringBuilder sb = new StringBuilder("{\"destination\":\"").append(it.destination())
+                .append("\",\"days\":").append(it.days())
+                .append(",\"totalBudget\":").append(it.totalBudget()).append(",\"dayPlans\":[");
+        for (int i = 0; i < it.dayPlans().size(); i++) {
+            Itinerary.DayPlan d = it.dayPlans().get(i);
+            if (i > 0) sb.append(",");
+            sb.append("{\"day\":").append(d.day()).append(",\"theme\":\"").append(d.theme())
+              .append("\",\"spots\":[");
+            for (int j = 0; j < d.spots().size(); j++) {
+                Itinerary.Spot s = d.spots().get(j);
+                if (j > 0) sb.append(",");
+                sb.append("{\"name\":\"").append(s.name()).append("\",\"type\":\"").append(s.type())
+                  .append("\",\"reason\":\"").append(s.reason()).append("\"}");
+            }
+            sb.append("]}");
+        }
+        sb.append("]}");
+        return sb.toString();
     }
 
     /** 三种输出形态共用的需求 → prompt 构造 */
