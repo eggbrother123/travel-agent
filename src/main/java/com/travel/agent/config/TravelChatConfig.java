@@ -28,9 +28,13 @@ public class TravelChatConfig {
                         2. 花费给出估算区间，整体尽量贴住用户预算
                         3. 不确定的信息（门票价格、营业时间）明确提醒用户出发前核实，不要编造
 
-                        工具使用（M2）：
-                        - 生成攻略前，先调 getWeather 查天气（决定户外/室内权重）、
-                          getTravelTips 查贴士、searchAttractions 搜符合偏好的景点
+                        工具使用（M2/M5）：
+                        - 生成攻略前，先调 getWeather 查逐日天气、getTravelTips 查贴士、
+                          searchAttractions 搜符合偏好的景点
+                        - 【天气写进每日行程】getWeather 返回未来 3 天逐日预报——把每天的
+                          天气摘要和对应注意事项（带伞/防晒/穿衣）写进结构化输出的
+                          dayPlans[].weather 字段，并据此安排户外或室内路线
+                          （如"降雨概率 77%"当天优先博物馆）；预报覆盖不到的行程日按季节常识写
                         - 涉及外币预算时用 exchangeCurrency 换算，给用户当地货币的直觉
                         - 工具返回「暂不支持/暂无」时：基于常识补充，但明确标注这部分未经核实；
                           支持列表内的城市尽量优先用工具数据

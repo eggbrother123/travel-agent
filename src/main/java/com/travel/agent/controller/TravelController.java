@@ -141,6 +141,8 @@ public class TravelController {
             return Map.of("error", "行程解析失败，请换个说法再试（原始输出片段："
                     + raw.substring(0, Math.min(120, raw.length())) + "…）");
         }
+        // 防御：模型偶尔会把未改动天的 estimatedCost 抹成 0——从当前行程回填丢失字段
+        updated = backfillMissing(current, updated);
 
         sessionService.saveItinerary(req.cid(), updated);
         return Map.of(
@@ -160,29 +162,52 @@ public class TravelController {
         return raw.substring(start, end + 1);
     }
 
+    /**
+     * 回填防御：模型输出完整新行程时，偶尔会把"没让你动"的天弄丢字段（实测 estimatedCost 抹 0）。
+     * 策略：day 序号相同的，若新值是 0/null 而旧值有数，回填旧值——未变化的字段以旧为准。
+     * record 不可变 → 用流式重建 dayPlans 列表，最后整体换一个新的 Itinerary 返回。
+     */
+    private Itinerary backfillMissing(Itinerary oldIt, Itinerary newIt) {
+        if (oldIt == null || newIt == null || oldIt.dayPlans() == null || newIt.dayPlans() == null) {
+            return newIt;
+        }
+        var repaired = newIt.dayPlans().stream().map(nd -> {
+            for (Itinerary.DayPlan od : oldIt.dayPlans()) {
+                if (od != null && od.day() == nd.day()) {
+                    boolean costLost = nd.estimatedCost() == 0 && od.estimatedCost() != 0;
+                    boolean mealLost = (nd.mealSuggestion() == null || nd.mealSuggestion().isBlank())
+                            && od.mealSuggestion() != null;
+                    boolean weatherLost = (nd.weather() == null || nd.weather().isBlank())
+                            && od.weather() != null;
+                    if (costLost || mealLost || weatherLost) {
+                        return new Itinerary.DayPlan(nd.day(), nd.theme(),
+                                weatherLost ? od.weather() : nd.weather(), nd.spots(),
+                                mealLost ? od.mealSuggestion() : nd.mealSuggestion(),
+                                costLost ? od.estimatedCost() : nd.estimatedCost());
+                    }
+                    break;
+                }
+            }
+            return nd;
+        }).toList();
+        return new Itinerary(newIt.destination(), newIt.days(), newIt.totalBudget(), repaired, newIt.tips());
+    }
+
     /** 调整请求体 */
     public record AdjustRequest(String cid, String request) {}
 
-    /** 行程 → JSON（给 prompt 用；生产建议换 ObjectMapper 注入，这里轻量实现） */
+    /**
+     * 行程 → JSON（给 prompt 用）。
+     * 踩坑记录：第一版手写拼接漏了 estimatedCost/mealSuggestion/tips 字段——模型看不到
+     * 当前费用，调整后全部填 0（前端 diff 又被 0≠550 连累成"全都调整了"）。
+     * 教训：给模型的"当前状态"必须完整，缺字段 = 模型编造默认值。改用 Jackson 全量序列化。
+     */
     private String toJson(Itinerary it) {
-        StringBuilder sb = new StringBuilder("{\"destination\":\"").append(it.destination())
-                .append("\",\"days\":").append(it.days())
-                .append(",\"totalBudget\":").append(it.totalBudget()).append(",\"dayPlans\":[");
-        for (int i = 0; i < it.dayPlans().size(); i++) {
-            Itinerary.DayPlan d = it.dayPlans().get(i);
-            if (i > 0) sb.append(",");
-            sb.append("{\"day\":").append(d.day()).append(",\"theme\":\"").append(d.theme())
-              .append("\",\"spots\":[");
-            for (int j = 0; j < d.spots().size(); j++) {
-                Itinerary.Spot s = d.spots().get(j);
-                if (j > 0) sb.append(",");
-                sb.append("{\"name\":\"").append(s.name()).append("\",\"type\":\"").append(s.type())
-                  .append("\",\"reason\":\"").append(s.reason()).append("\"}");
-            }
-            sb.append("]}");
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(it);
+        } catch (Exception e) {
+            throw new IllegalStateException("行程序列化失败", e);
         }
-        sb.append("]}");
-        return sb.toString();
     }
 
     /** 三种输出形态共用的需求 → prompt 构造 */
@@ -194,7 +219,10 @@ public class TravelController {
                 - 预算：约 %.0f 元
                 - 偏好：%s
 
-                按天分段安排（上午/下午/晚上），每天结尾给出当日花费估算，最后给整体花费合计和实用贴士。
+                按天分段安排（上午/下午/晚上）。每天的第一行先写「当日天气」：
+                调用 getWeather 拿逐日预报，把该日的天气（温度区间/降雨概率）和对应注意事项
+                （带伞/防晒/穿衣/是否宜户外）写在标题下；预报覆盖不到的行程日按季节常识写。
+                每天结尾给出当日花费估算，最后给整体花费合计和实用贴士。
                 """.formatted(destination, days, budget, preferences);
     }
 }

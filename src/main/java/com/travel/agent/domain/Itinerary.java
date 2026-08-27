@@ -18,10 +18,11 @@ public record Itinerary(
         List<DayPlan> dayPlans,
         List<String> tips) {
 
-    /** 单日安排：主题 + 点位列表 + 用餐建议 + 当日花费估算 */
+    /** 单日安排：主题 + 当日天气（含注意事项）+ 点位列表 + 用餐建议 + 当日花费估算 */
     public record DayPlan(
             int day,
             String theme,
+            String weather,
             List<Spot> spots,
             String mealSuggestion,
             double estimatedCost) {}

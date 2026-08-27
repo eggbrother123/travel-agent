@@ -42,7 +42,13 @@
   - 实测：成都 3 日 →「第二天太赶换茶馆」只动 Day2（Day1/3 原样）；第二轮「草堂换博物馆」只动 Day3；记忆 2→4 条累加；cid 隔离（other-user 拒绝）
   - 踩坑：Git Bash curl 发中文 JSON 会坏编码（Invalid UTF-8 start byte），要 printf UTF-8 字节序列写文件再 --data-binary @file
   - 踩坑（重要）：**工具调用 + `.entity()` 组合下，DeepSeek 偶尔先输出思考文字再给 JSON**（"Based on the request..." / "I have all the information..."），entity 直接解析 500。修复：`/plan/struct` 和 `/plan/adjust` 统一改 BeanOutputConverter + extractJson（截取首个 `{` 到末个 `}`）防御性解析；adjust 解析失败返回友好错误而非 500
-- [ ] **M5 体验升级**（可选）：前端页面 + 高德/和风真实 API + 导出 Markdown
+  - 踩坑（重要）：**注入 prompt 的"当前行程"序列化不完整 = 模型编造默认值**——第一版 toJson 手写拼接漏了 estimatedCost/mealSuggestion/tips，模型看不到旧费用全填 0，前端 diff 又把 cost 550→0 的天误标"已调整"。修复：Jackson 全量序列化 + backfillMissing 回填防御（模型抹零的字段从旧行程回填）。教训：给模型的状态快照必须完整，缺什么它编什么
+- [x] **M5 体验升级** ✅ 2026-08-28
+  - 真实天气：getWeather 换 wttr.in 免费接口（无 key，英文城市名 + 24 城中文映射表）——失败直接否判断兜底（告知查不到+转常识建议），**宁可没有不用假数据**（初版的 Mock fallback 已按用户要求移除）
+  - 逐日天气进行程：getWeather 返回未来 3 天逐日预报（温度区间/最大降雨概率/UV），DayPlan 加 weather 字段——模型把每日天气+注意事项写进对应 Day（前端蓝底天气条 + 导出 md 天气行）。实测杭州 3 日：Day2 降雨 77% → 模型主动把该天安排成灵隐禅意+短途徒步而非全天户外，数值与 wttr.in 源逐项对齐
+  - 导出双入口：GET /plan/export?cid=（行程卡片模式，Itinerary 转 md）+ POST /plan/export/md（流式模式，SSE 攒下的 Markdown 原文直接成文件）；均 RFC 5987 中文文件名；文件名清洗防目录穿越（`\/:*?"<>|` → `_`）
+  - 前端：调整区加导出按钮、行程卡片生成期间显示骨架屏（shimmer 动画）、页脚版本信息
+  - 实测：伦敦攻略的"22°C 有阵雨"与 wttr.in 实查值同源；京都导出 md 结构完整（Day/点位/交通/费用/贴士）；错误 cid 返回 400 友好提示
 - [ ] **M6 收尾**：架构图 + 录屏 + 踩坑记录 + 面试素材映射表
 
 ## 快速开始

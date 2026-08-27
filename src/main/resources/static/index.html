@@ -96,6 +96,8 @@
         .spot .trans { color: #b4884d; font-size: 12px; }
         .day-meal { margin-top: 10px; font-size: 13px; color: #6b655e;
                     background: #faf7f2; border-radius: 8px; padding: 8px 12px; }
+        .day-weather { font-size: 13px; color: #5a7a9e; background: #eef4fa;
+                       border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; }
         .tips-box { background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
                     padding: 18px 24px; margin-top: 16px; }
         .tips-box h3 { font-size: 15px; color: #7a5c2e; margin: 0 0 8px; }
@@ -112,6 +114,20 @@
         .adj-row button { padding: 9px 22px; font-size: 14px; border: none; border-radius: 8px;
                           background: #7a5c2e; color: #fff; cursor: pointer; }
         .adj-row button:disabled { background: #d5c4ab; cursor: not-allowed; }
+        .adj-row .ghost-btn { background: transparent; color: #9e7440; border: 1px solid #d8c9b2; }
+        .adj-row .ghost-btn:hover { background: #f5efe6; }
+
+        /* 骨架屏：加载中占位，比干等体验好 */
+        .skeleton { background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
+                    padding: 24px; margin-bottom: 14px; }
+        .sk-line { height: 14px; border-radius: 6px; margin: 10px 0;
+                   background: linear-gradient(90deg, #f0ebe4 25%, #faf7f2 50%, #f0ebe4 75%);
+                   background-size: 200% 100%; animation: shimmer 1.3s infinite; }
+        .sk-line.short { width: 40%; }
+        .sk-line.mid { width: 75%; }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+        footer { margin: 40px 0 20px; font-size: 12px; color: #b5aea5; text-align: center; }
         .adj-status { font-size: 12.5px; color: #8a8580; margin-top: 8px; }
         .day-card.changed { border-color: #b4884d; box-shadow: 0 0 0 2px #f3e4cd; }
         .diff-badge { font-size: 11px; background: #b4884d; color: #fff;
@@ -119,7 +135,7 @@
     </style>
 </head>
 <body>
-    <h1>旅行攻略生成器 <span>· travel-agent M4</span></h1>
+    <h1>旅行攻略生成器 <span>· travel-agent M5</span></h1>
 
     <div class="form-card">
         <div class="mode-row">
@@ -152,6 +168,8 @@
     </div>
 
     <div id="result"></div>
+
+    <footer>travel-agent M5 · DeepSeek + Spring AI · RAG 知识库 6 城 · 真实天气（wttr.in）</footer>
 
     <script>
         let mode = 'md';        // 'md' 流式文档 | 'struct' 行程卡片
@@ -201,6 +219,8 @@
         }
 
         /* ===== 流式模式：EventSource 消费 SSE，边收边 marked 渲染 ===== */
+        let lastStreamMd = '';   // 流式模式攒下的 Markdown 原文（导出用）
+
         async function streamMd(q, resultDiv, statusEl, t0) {
             statusEl.textContent = '小旅正在写攻略…';
             const box = document.createElement('div');
@@ -224,7 +244,40 @@
                 resolve0 = resolve;
             });
             box.innerHTML = marked.parse(acc);
+            lastStreamMd = acc;
+            // 流结束后给导出按钮（Markdown 原文 → md 文件）
+            const exportBar = document.createElement('div');
+            exportBar.className = 'adjust-box';
+            exportBar.innerHTML = `
+                <div class="adj-row">
+                    <button class="ghost-btn" onclick="exportStreamMd()">导出 Markdown</button>
+                    <span class="adj-status">把本次生成的攻略原文存成 .md 文件</span>
+                </div>`;
+            resultDiv.appendChild(exportBar);
             statusEl.textContent = `完成，总耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+        }
+
+        /* 流式模式导出：POST 攒下的 Markdown 原文，后端成文件 */
+        async function exportStreamMd() {
+            if (!lastStreamMd) { alert('还没有可导出的内容'); return; }
+            const d = document.getElementById('destination').value.trim() || '旅行';
+            const days = document.getElementById('days').value || '';
+            try {
+                const resp = await fetch('/plan/export/md', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: lastStreamMd, filename: d + days + '日攻略.md' })
+                });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const blob = await resp.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = d + days + '日攻略.md';
+                a.click();
+                URL.revokeObjectURL(a.href);
+            } catch (e) {
+                alert('导出失败：' + e.message);
+            }
         }
         let resolve0 = null;
         function stopStream() {
@@ -234,14 +287,25 @@
         /* ===== 结构化模式：拿 Itinerary JSON，渲染行程卡片 ===== */
         async function fetchStruct(q, resultDiv, statusEl, t0) {
             statusEl.textContent = '小旅规划中（等完整 JSON 生成，约 30~60s）…';
+            // 骨架屏占位（M5）：生成要 20~60s，干等一行字不如给个"正在排版"的视觉反馈
+            const sk = document.createElement('div');
+            sk.innerHTML = Array(3).fill(0).map(() =>
+                `<div class="skeleton"><div class="sk-line mid"></div><div class="sk-line"></div><div class="sk-line"></div><div class="sk-line short"></div></div>`).join('');
+            resultDiv.appendChild(sk);
             const cid = ensureCid();
-            const resp = await fetch('/plan/struct?' + q + '&cid=' + encodeURIComponent(cid));
-            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-            const it = await resp.json();
-            currentIt = it;
-            resultDiv.appendChild(renderItinerary(it));
-            resultDiv.appendChild(buildAdjustBox());
-            statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+            try {
+                const resp = await fetch('/plan/struct?' + q + '&cid=' + encodeURIComponent(cid));
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const it = await resp.json();
+                currentIt = it;
+                sk.remove();
+                resultDiv.appendChild(renderItinerary(it));
+                resultDiv.appendChild(buildAdjustBox());
+                statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+            } catch (e) {
+                sk.remove();
+                throw e;
+            }
         }
 
         /* ===== M4 多轮调整 ===== */
@@ -265,9 +329,15 @@
                 <div class="adj-row">
                     <input id="adj-input" placeholder='试试："第二天太赶了，换个轻松的" / "把博物馆换成美食"' >
                     <button id="adj-go" onclick="adjust()">调整</button>
+                    <button id="export-btn" class="ghost-btn" onclick="exportMd()">导出 Markdown</button>
                 </div>
                 <div class="adj-status" id="adj-status">基于当前行程增量修改，只动你要求改的部分</div>`;
             return box;
+        }
+
+        /* M5 导出：直接下载当前会话的最新行程 md 文件 */
+        function exportMd() {
+            window.open('/plan/export?cid=' + encodeURIComponent(ensureCid()), '_blank');
         }
 
         async function adjust() {
@@ -350,6 +420,7 @@
                         <span class="day-title">Day ${day.day} · ${esc(day.theme || '')}</span>
                         <span class="day-cost">预计 ¥${day.estimatedCost}</span>
                     </div>
+                    ${day.weather ? `<div class="day-weather">🌤️ ${esc(day.weather)}</div>` : ''}
                     ${spotsHtml}
                     ${day.mealSuggestion ? `<div class="day-meal">🍽️ ${esc(day.mealSuggestion)}</div>` : ''}`;
                 wrap.appendChild(card);

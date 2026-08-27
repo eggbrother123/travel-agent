@@ -31,14 +31,32 @@ public class TravelTools {
 
     private final VectorStore travelVectorStore;
 
-    /** 城市天气表：小而稳定的事实数据，保留内存版（M5 可换和风天气 API） */
-    private static final Map<String, String> WEATHER = Map.of(
-            "东京", "22°C，晴转多云，湿度 60%，微风。适合户外活动，早晚温差约 5°C。",
-            "北京", "18°C，晴，空气质量良。秋季最佳游览季节，注意早晚添衣。",
-            "杭州", "24°C，小雨转阴，湿度 75%。建议带伞；雨中西湖别有韵味。",
-            "成都", "20°C，阴，湿度 80%。舒适但少日照，火锅季节。",
-            "巴黎", "15°C，多云间晴，偶有阵雨。经典巴黎天气，备轻便雨衣。",
-            "伦敦", "12°C，阴有小雨，湿度 85%。典型伦敦天气，必带伞。"
+    /** wttr.in 只认英文城市名（中文实测 location not found）——知识库 6 城映射 + 常见城市兜底 */
+    private static final Map<String, String> CITY_TO_EN = Map.ofEntries(
+            Map.entry("东京", "Tokyo"),
+            Map.entry("北京", "Beijing"),
+            Map.entry("杭州", "Hangzhou"),
+            Map.entry("成都", "Chengdu"),
+            Map.entry("巴黎", "Paris"),
+            Map.entry("伦敦", "London"),
+            Map.entry("上海", "Shanghai"),
+            Map.entry("西安", "Xian"),
+            Map.entry("重庆", "Chongqing"),
+            Map.entry("广州", "Guangzhou"),
+            Map.entry("深圳", "Shenzhen"),
+            Map.entry("香港", "Hong Kong"),
+            Map.entry("首尔", "Seoul"),
+            Map.entry("新加坡", "Singapore"),
+            Map.entry("曼谷", "Bangkok"),
+            Map.entry("大阪", "Osaka"),
+            Map.entry("京都", "Kyoto"),
+            Map.entry("纽约", "New York"),
+            Map.entry("旧金山", "San Francisco"),
+            Map.entry("罗马", "Rome"),
+            Map.entry("伊斯坦布尔", "Istanbul"),
+            Map.entry("迪拜", "Dubai"),
+            Map.entry("悉尼", "Sydney"),
+            Map.entry("莫斯科", "Moscow")
     );
 
     /** 汇率表：1 CNY 能兑换多少该货币（小而稳定，保留内存版；M5 可换真实汇率 API） */
@@ -58,17 +76,72 @@ public class TravelTools {
     }
 
     /**
-     * 查目的地天气。生成攻略前调用，决定雨天方案（室内博物馆优先）还是户外路线。
+     * 查目的地天气（M5：真实数据 + 逐日预报）。wttr.in 免费无 key。
+     * 返回当前实况 + 未来 3 天逐日预报（温度区间/降雨概率/UV）——模型把每天的
+     * 天气和注意事项写进对应 Day 的标题下（"Day1 ☔ 降雨概率 77%，安排室内博物馆"）。
+     * 失败兜底：否判断文案——天气是「增强信息」不是「关键路径」，宁可告知查不到，
+     * 不用编造的假数据糊弄用户。
      */
-    @Tool(description = "查询目的地城市的天气。生成行程前调用，用于决定雨天备选方案或户外路线安排")
+    @Tool(description = "查询目的地城市的实时天气和未来3天逐日天气预报（含每日温度区间、降雨概率、紫外线指数）。生成行程时调用，把每天的天气写进对应日期的行程安排和注意事项里")
     public String getWeather(@ToolParam(description = "城市名称，如：东京、北京、杭州") String city) {
         System.out.println(">>> [工具] getWeather city=" + city);
-        String w = WEATHER.get(city.trim());
-        if (w == null) {
-            return "暂无 " + city + " 的天气数据，目前支持：" + String.join("、", WEATHER.keySet())
-                    + "。如不在此列表，请基于常识给出通用建议并提醒用户出行前查看天气预报。";
+        String name = city.trim();
+        String en = CITY_TO_EN.get(name);
+
+        // 真实 API（英文城市名才认，映射表没有的直接试原名——部分英文城市模型会传英文）
+        if (en != null || name.matches("[a-zA-Z ]+")) {
+            try {
+                String url = "https://wttr.in/" + (en != null ? en : name.replace(" ", "+"))
+                        + "?format=j1&lang=zh";
+                String json = java.net.http.HttpClient.newBuilder()
+                        .connectTimeout(java.time.Duration.ofSeconds(5))
+                        .build()
+                        .send(java.net.http.HttpRequest.newBuilder()
+                                        .uri(java.net.URI.create(url))
+                                        .timeout(java.time.Duration.ofSeconds(8))
+                                        .GET().build(),
+                                java.net.http.HttpResponse.BodyHandlers.ofString())
+                        .body();
+                var root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+
+                StringBuilder sb = new StringBuilder();
+                // 当前实况
+                var cur = root.path("current_condition").path(0);
+                if (!cur.isMissingNode()) {
+                    sb.append(String.format("%s 当前实况：%s，%s°C（体感 %s°C），湿度 %s%%\n",
+                            name,
+                            cur.path("lang_zh").path(0).path("value").asText(
+                                    cur.path("weatherDesc").path(0).path("value").asText("")),
+                            cur.path("temp_C").asText(), cur.path("FeelsLikeC").asText(),
+                            cur.path("humidity").asText()));
+                }
+                // 未来 3 天逐日预报（模型按日期对齐到行程 Day，近的在前）
+                var days = root.path("weather");
+                int idx = 0;
+                for (var d : days) {
+                    if (idx++ >= 3) break;
+                    int maxRain = 0;
+                    for (var h : d.path("hourly")) {
+                        maxRain = Math.max(maxRain, h.path("chanceofrain").asInt(0));
+                    }
+                    String noonDesc = d.path("hourly").path(4).path("weatherDesc").path(0)
+                            .path("value").asText("");
+                    sb.append(String.format("第%d天（%s）：%s，%s~%s°C，最大降雨概率 %d%%，UV 指数 %s\n",
+                            idx, d.path("date").asText(), noonDesc,
+                            d.path("mintempC").asText(), d.path("maxtempC").asText(),
+                            maxRain, d.path("uvIndex").asText()));
+                }
+                if (sb.length() > 0) {
+                    return "【wttr.in 天气预报】\n" + sb + "（说明：预报最多 3 天，更后面的行程日请按季节常识给建议）";
+                }
+            } catch (Exception e) {
+                System.out.println(">>> [工具] wttr.in 调用失败：" + e.getMessage());
+            }
         }
-        return city + " 天气：" + w;
+
+        // 否判断兜底（API 失败/城市不识别）——宁可告知查不到，不给假数据
+        return "暂无 " + name + " 的实时天气（外部天气服务不可用或该城市不在支持列表）。"
+                + "请基于常识给出通用建议并提醒用户出行前查看天气预报。";
     }
 
     /**
