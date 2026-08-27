@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>旅行攻略生成器 · 小旅</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+            max-width: 860px; margin: 40px auto; padding: 0 20px;
+            background: #faf9f7; color: #2d2a26; line-height: 1.75;
+        }
+        h1 { font-size: 22px; }
+        h1 span { font-size: 14px; color: #8a8580; font-weight: normal; }
+
+        .form-card {
+            background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
+            padding: 20px; margin-bottom: 24px;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 14px 18px;
+        }
+        .form-card label { font-size: 13px; color: #6b655e; display: block; margin-bottom: 4px; }
+        .form-card input {
+            width: 100%; padding: 9px 10px; font-size: 14px;
+            border: 1px solid #d8d2ca; border-radius: 8px; background: #fff;
+        }
+        .form-card input:focus { outline: 2px solid #c9b8a3; border-color: transparent; }
+        .btn-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        button {
+            padding: 10px 26px; font-size: 15px; border: none; border-radius: 8px;
+            background: #b4884d; color: #fff; cursor: pointer;
+        }
+        button:hover { background: #9e7440; }
+        button:disabled { background: #d5c4ab; cursor: not-allowed; }
+        button.ghost { background: transparent; color: #9e7440; border: 1px solid #d8c9b2; padding: 8px 18px; }
+        button.ghost:hover { background: #f5efe6; }
+        #status { font-size: 13px; color: #8a8580; }
+
+        /* 模式切换（M1）：流式 = Markdown 打字机；结构化 = Itinerary 行程卡片 */
+        .mode-row { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+        .mode-row .mode-label { font-size: 13px; color: #6b655e; margin-right: 4px; }
+        .mode-btn {
+            padding: 6px 16px; font-size: 13px; border-radius: 999px;
+            border: 1px solid #d8d2ca; background: #fff; color: #6b655e; cursor: pointer;
+        }
+        .mode-btn.active { background: #7a5c2e; border-color: #7a5c2e; color: #fff; }
+        .mode-hint { font-size: 12px; color: #b5aea5; }
+
+        #result { min-height: 200px; }
+        #result:empty::before {
+            content: "填好需求，点「生成攻略」，小旅会为你规划路线 ✈️";
+            color: #b5aea5; font-size: 14px;
+        }
+
+        /* ===== 流式 Markdown 模式 ===== */
+        #md-box { background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
+                  padding: 28px 32px; }
+        #md-box h2 { font-size: 19px; border-bottom: 2px solid #eee7dd; padding-bottom: 8px; margin-top: 30px; }
+        #md-box h3 { font-size: 16px; color: #7a5c2e; margin-top: 24px; }
+        #md-box h4 { font-size: 14.5px; margin-top: 18px; }
+        #md-box table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 14px; }
+        #md-box th, #md-box td { border: 1px solid #e0d9cf; padding: 7px 10px; text-align: left; }
+        #md-box th { background: #f5efe6; }
+        #md-box tr:nth-child(even) { background: #faf7f2; }
+        #md-box strong { color: #7a5c2e; }
+        #md-box hr { border: none; border-top: 1px solid #eee7dd; margin: 22px 0; }
+        #md-box ul, #md-box ol { padding-left: 22px; }
+        #md-box li { margin: 4px 0; }
+        #md-box blockquote { border-left: 3px solid #c9b8a3; margin: 12px 0;
+                             padding: 4px 14px; background: #faf7f2; color: #6b655e; }
+        .cursor { display: inline-block; width: 8px; background: #b4884d; animation: blink 0.9s infinite; }
+        @keyframes blink { 50% { opacity: 0; } }
+
+        /* ===== 结构化行程卡片模式 ===== */
+        .it-header { background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
+                     padding: 20px 26px; margin-bottom: 16px;
+                     display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+        .it-header .dest { font-size: 20px; font-weight: 600; color: #7a5c2e; }
+        .it-header .meta { font-size: 13px; color: #8a8580; }
+        .day-card { background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
+                    padding: 18px 24px; margin-bottom: 14px; }
+        .day-card .day-head { display: flex; justify-content: space-between; align-items: baseline;
+                              border-bottom: 1px dashed #e0d9cf; padding-bottom: 8px; margin-bottom: 10px; }
+        .day-card .day-title { font-size: 16px; font-weight: 600; color: #7a5c2e; }
+        .day-card .day-cost { font-size: 13px; color: #b4884d; white-space: nowrap; }
+        .spot { display: flex; gap: 10px; padding: 8px 0; font-size: 14px; }
+        .spot + .spot { border-top: 1px dotted #efe9e0; }
+        .spot .idx { flex: none; width: 22px; height: 22px; border-radius: 50%;
+                     background: #f5efe6; color: #9e7440; font-size: 12px;
+                     display: flex; align-items: center; justify-content: center; margin-top: 2px; }
+        .spot .name { font-weight: 600; }
+        .spot .type { font-size: 12px; color: #fff; background: #c9b8a3; border-radius: 4px;
+                      padding: 1px 7px; margin-left: 6px; vertical-align: 1px; }
+        .spot .reason { color: #6b655e; font-size: 13px; }
+        .spot .trans { color: #b4884d; font-size: 12px; }
+        .day-meal { margin-top: 10px; font-size: 13px; color: #6b655e;
+                    background: #faf7f2; border-radius: 8px; padding: 8px 12px; }
+        .tips-box { background: #fff; border: 1px solid #e8e4de; border-radius: 12px;
+                    padding: 18px 24px; margin-top: 16px; }
+        .tips-box h3 { font-size: 15px; color: #7a5c2e; margin: 0 0 8px; }
+        .tips-box li { font-size: 14px; margin: 4px 0; }
+    </style>
+</head>
+<body>
+    <h1>旅行攻略生成器 <span>· travel-agent M1</span></h1>
+
+    <div class="form-card">
+        <div class="mode-row">
+            <span class="mode-label">输出模式</span>
+            <button class="mode-btn active" id="mode-md" onclick="setMode('md')">流式文档</button>
+            <button class="mode-btn" id="mode-struct" onclick="setMode('struct')">行程卡片</button>
+            <span class="mode-hint" id="mode-hint">Markdown 流式打字机（/plan/stream）</span>
+        </div>
+        <div>
+            <label>目的地</label>
+            <input id="destination" value="东京" placeholder="想去哪？">
+        </div>
+        <div>
+            <label>天数</label>
+            <input id="days" type="number" value="3" min="1" max="30">
+        </div>
+        <div>
+            <label>预算（元）</label>
+            <input id="budget" type="number" value="8000" min="100">
+        </div>
+        <div>
+            <label>偏好</label>
+            <input id="preferences" value="美食,博物馆" placeholder="美食 / 博物馆 / 亲子 / 户外…">
+        </div>
+        <div class="btn-row">
+            <button id="go" onclick="generate()">生成攻略</button>
+            <button class="ghost" id="stop" onclick="stopStream()" style="display:none">停止</button>
+            <span id="status"></span>
+        </div>
+    </div>
+
+    <div id="result"></div>
+
+    <script>
+        let mode = 'md';        // 'md' 流式文档 | 'struct' 行程卡片
+        let es = null;          // 当前 EventSource（流式模式）
+
+        function setMode(m) {
+            mode = m;
+            document.getElementById('mode-md').classList.toggle('active', m === 'md');
+            document.getElementById('mode-struct').classList.toggle('active', m === 'struct');
+            document.getElementById('mode-hint').textContent =
+                m === 'md' ? 'Markdown 流式打字机（/plan/stream）'
+                           : '结构化行程 JSON 渲染卡片（/plan/struct）';
+        }
+
+        function buildQuery() {
+            const d = document.getElementById('destination').value.trim();
+            if (!d) { alert('请填写目的地'); return null; }
+            return `destination=${encodeURIComponent(d)}`
+                 + `&days=${document.getElementById('days').value}`
+                 + `&budget=${document.getElementById('budget').value}`
+                 + `&preferences=${encodeURIComponent(document.getElementById('preferences').value.trim())}`;
+        }
+
+        function setBusy(b) {
+            document.getElementById('go').disabled = b;
+            document.getElementById('stop').style.display = (b && mode === 'md') ? '' : 'none';
+        }
+
+        async function generate() {
+            stopStream();
+            const q = buildQuery();
+            if (!q) return;
+            const resultDiv = document.getElementById('result');
+            const statusEl = document.getElementById('status');
+            resultDiv.innerHTML = '';
+            setBusy(true);
+            const t0 = performance.now();
+
+            try {
+                if (mode === 'md') await streamMd(q, resultDiv, statusEl, t0);
+                else await fetchStruct(q, resultDiv, statusEl, t0);
+            } catch (e) {
+                statusEl.textContent = '出错了：' + e.message;
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        /* ===== 流式模式：EventSource 消费 SSE，边收边 marked 渲染 ===== */
+        async function streamMd(q, resultDiv, statusEl, t0) {
+            statusEl.textContent = '小旅正在写攻略…';
+            const box = document.createElement('div');
+            box.id = 'md-box';
+            resultDiv.appendChild(box);
+
+            let acc = '';
+            let first = true;
+            await new Promise((resolve, reject) => {
+                es = new EventSource('/plan/stream?' + q);
+                es.onmessage = function (e) {
+                    if (first) {
+                        statusEl.textContent = `首字 ${((performance.now() - t0) / 1000).toFixed(1)}s，生成中…`;
+                        first = false;
+                    }
+                    acc += e.data;
+                    // 增量渲染 + 打字机光标（每次全量重渲染，3 天攻略量级下性能足够）
+                    box.innerHTML = marked.parse(acc) + '<span class="cursor">&nbsp;</span>';
+                };
+                es.onerror = function () { es.close(); es = null; resolve(); };  // 流正常结束也会触发 error，统一在这里收尾
+                resolve0 = resolve;
+            });
+            box.innerHTML = marked.parse(acc);
+            statusEl.textContent = `完成，总耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+        }
+        let resolve0 = null;
+        function stopStream() {
+            if (es) { es.close(); es = null; if (resolve0) { resolve0(); resolve0 = null; } }
+        }
+
+        /* ===== 结构化模式：拿 Itinerary JSON，渲染行程卡片 ===== */
+        async function fetchStruct(q, resultDiv, statusEl, t0) {
+            statusEl.textContent = '小旅规划中（等完整 JSON 生成，约 30~60s）…';
+            const resp = await fetch('/plan/struct?' + q);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const it = await resp.json();
+            resultDiv.appendChild(renderItinerary(it));
+            statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+        }
+
+        function renderItinerary(it) {
+            const wrap = document.createElement('div');
+
+            const header = document.createElement('div');
+            header.className = 'it-header';
+            header.innerHTML = `
+                <span class="dest">📍 ${esc(it.destination)} ${it.days} 日攻略</span>
+                <span class="meta">预算 ${it.totalBudget} 元 · ${it.dayPlans ? it.dayPlans.length : 0} 天行程</span>`;
+            wrap.appendChild(header);
+
+            (it.dayPlans || []).forEach(day => {
+                const card = document.createElement('div');
+                card.className = 'day-card';
+                const spotsHtml = (day.spots || []).map((s, i) => `
+                    <div class="spot">
+                        <div class="idx">${i + 1}</div>
+                        <div>
+                            <span class="name">${esc(s.name)}</span><span class="type">${esc(s.type || '')}</span>
+                            <div class="reason">${esc(s.reason || '')}</div>
+                            ${s.transportToNext ? `<div class="trans">→ 下一站：${esc(s.transportToNext)}</div>` : ''}
+                        </div>
+                    </div>`).join('');
+                card.innerHTML = `
+                    <div class="day-head">
+                        <span class="day-title">Day ${day.day} · ${esc(day.theme || '')}</span>
+                        <span class="day-cost">预计 ¥${day.estimatedCost}</span>
+                    </div>
+                    ${spotsHtml}
+                    ${day.mealSuggestion ? `<div class="day-meal">🍽️ ${esc(day.mealSuggestion)}</div>` : ''}`;
+                wrap.appendChild(card);
+            });
+
+            if (it.tips && it.tips.length) {
+                const tips = document.createElement('div');
+                tips.className = 'tips-box';
+                tips.innerHTML = `<h3>💡 实用贴士</h3><ul>${it.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>`;
+                wrap.appendChild(tips);
+            }
+            return wrap;
+        }
+
+        function esc(s) {
+            return String(s ?? '').replace(/[&<>"']/g,
+                c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+    </script>
+</body>
+</html>

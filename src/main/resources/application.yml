@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: travel-agent
+
+  ai:
+    model:
+      chat: openai           # 对话：OpenAI 兼容协议 → DeepSeek
+      embedding: ollama      # 向量：本地 Ollama（M3 RAG 时才真正调用，不跑 Ollama 不影响启动）
+
+    openai:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY}   # 只从环境变量读，千万别写死提交！
+      chat:
+        options:
+          model: deepseek-chat
+          temperature: 0.7   # 攻略生成要一点发散性，0.7 合适
+
+    ollama:
+      base-url: http://localhost:11434
+      embedding:
+        options:
+          model: bge-m3      # Day4 实测：中文召回精准
+
+server:
+  port: 8081                 # 8080 留给 spring-ai-hello，两个项目可同时跑
