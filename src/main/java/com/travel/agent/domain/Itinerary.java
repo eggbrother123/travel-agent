@@ -33,4 +33,5 @@ public record Itinerary(
             String type,
             String reason,
             String transportToNext) {}
+
 }
