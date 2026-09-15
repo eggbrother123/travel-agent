@@ -2,6 +2,14 @@ spring:
   application:
     name: travel-agent
 
+  # E1：Redis 集中存储（对话记忆+行程状态）。超时 2s 保证 Redis 故障时快速降级而不是干等
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      timeout: 2s
+      connect-timeout: 2s
+
   ai:
     model:
       chat: openai           # 对话：OpenAI 兼容协议 → DeepSeek

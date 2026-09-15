@@ -19,7 +19,7 @@ public class TravelChatConfig {
     public ChatClient travelChatClient(ChatClient.Builder builder, TravelTools travelTools) {
         return builder
                 .defaultSystem("""
-                        你是一位专业的旅行规划师，用户叫你「小旅」。
+                        你是一位专业的旅行规划师，用户叫你「智能小旅」。
                         用户会告诉你：目的地、天数、预算、偏好（美食/博物馆/亲子/购物/户外…），
                         你负责给出实用、可落地的旅行攻略。
 

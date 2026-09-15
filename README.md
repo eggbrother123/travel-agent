@@ -104,7 +104,7 @@ src/main/resources/
 └── static/index.html                  # 前端双模式页面
 ```
 
-## 面试素材映射（全部实测，详见 docs/interview-qa.md）
+## 面试素材映射（全部实测，详见 docs/interview-qa.md；E1 存储对比详见 docs/memory-redis-vs-heap.md）
 
 | # | 素材 | 一句话 | 来源 |
 |---|---|---|---|
@@ -119,11 +119,20 @@ src/main/resources/
 
 ## 企业级演进路线（下一阶段）
 
-| 现在 | 目标 | 面试考点 |
-|---|---|---|
-| 内存 ChatMemory + Map | Redis 集中存储 | 多实例部署记忆串话 |
-| SimpleVectorStore | Milvus/PGVector + 增量索引 | 向量库选型、索引更新 |
-| System.out 日志 | Micrometer token/延迟/成本打点 | 可观测性 |
-| 裸接口 | 限流 + PII 脱敏 | 安全层 |
-| 全 deepseek-chat | 分级模型 + FAQ 缓存 | 成本优化 |
-| 手动起服务 | Docker Compose 全栈 | 部署 |
+| 现在 | 目标 | 面试考点 | 状态 |
+|---|---|---|---|
+| ~~内存 ChatMemory + Map~~ | Redis 集中存储 | 多实例部署记忆串话 | ✅ E1 完成（2026-09-10） |
+| SimpleVectorStore | Milvus/PGVector + 增量索引 | 向量库选型、索引更新 | ⬜ |
+| System.out 日志 | Micrometer token/延迟/成本打点 | 可观测性 | ⬜ |
+| 裸接口 | 限流 + PII 脱敏 | 安全层 | ⬜ |
+| 全 deepseek-chat | 分级模型 + FAQ 缓存 | 成本优化 | ⬜ |
+| 手动起服务 | Docker Compose 全栈 | 部署 | ⬜ |
+
+### E1 Redis 集中存储（2026-09-10）✅
+
+- **自研 RedisChatMemory**（Spring AI 1.0.0 只有内存/JDBC 实现）：List 结构 + RPUSH 追加 + LTRIM 滑窗 20 条 + 滑动 TTL 24h；消息 role+text 精简序列化（tool metadata 不落库的取舍）
+- **RedisItineraryStore**：行程状态 String 结构 JSON 整存整取，TTL 与记忆对齐——数据结构跟着访问模式走（List=有序可滑窗，String=整树读写）
+- **降级设计（影子副本）**：写 Redis+内存双写，读 Redis 失败读实例内存影子——降级代价明确：单实例可用但跨实例共享/重启存活能力丢失
+- ItinerarySessionService 重构为构造器注入（依赖倒置：存储策略可替换）
+- **实测**：①跨重启状态连续性——重启后同 cid 直接调整成功，Day2 保持重启前的购物版、记忆 4→6 条累加；②redis-cli 可见真实 key（travel:chat:{cid} 4 条、travel:itinerary:{cid} TTL 86337s）；③Redis 故障（错端口 8082 实例）struct/adjust 全 200 + 降级日志
+- **踩坑**：/plan/struct 写初始记忆漏传 CONVERSATION_ID → 落到 Advisor 默认"default"桶——内存版时代不可见，外置到 Redis 才现形（外置存储的可观测性红利）

@@ -18,11 +18,11 @@ import java.util.Map;
 
 /**
  * 攻略生成接口（M1~M4 演进）：
- *  /plan          纯文本 Markdown（M0）
- *  /plan/struct   Itinerary record 树 JSON（M1）——M4 起存入会话状态
- *  /plan/stream   SSE 流式打字机（M1）
- *  /plan/adjust   多轮调整（M4）：cid 会话 + 自然语言请求 → 基于当前行程增量修改
- *
+ * /plan          纯文本 Markdown（M0）
+ * /plan/struct   Itinerary record 树 JSON（M1）——M4 起存入会话状态
+ * /plan/stream   SSE 流式打字机（M1）
+ * /plan/adjust   多轮调整（M4）：cid 会话 + 自然语言请求 → 基于当前行程增量修改
+ * <p>
  * M4 关键：对话记忆（ChatMemory）和行程状态（Itinerary 对象）是两回事——
  * 记忆管"说过什么"（ Advisor 自动读写），状态管"最新攻略长什么样"（这里显式存取）。
  */
@@ -34,7 +34,7 @@ public class TravelController {
     private final ItinerarySessionService sessionService;
 
     public TravelController(ChatClient travelChatClient,
-                             ItinerarySessionService sessionService) {
+                            ItinerarySessionService sessionService) {
         this.travelChatClient = travelChatClient;
         this.sessionService = sessionService;
         // 带记忆的 ChatClient：复用全局默认（系统提示词+工具），叠加记忆 Advisor
@@ -43,7 +43,9 @@ public class TravelController {
                 .build();
     }
 
-    /** M0 纯文本版（Markdown）。 */
+    /**
+     * M0 纯文本版（Markdown）。
+     */
     @GetMapping("/plan")
     public String plan(@RequestParam String destination,
                        @RequestParam(defaultValue = "3") int days,
@@ -77,16 +79,21 @@ public class TravelController {
 
         if (cid != null && !cid.isBlank()) {
             sessionService.saveItinerary(cid, it);
-            // 初始需求也写进对话记忆，后续调整才有上下文（"上次说的博物馆"有指代）
+            // 初始需求也写进对话记忆，后续调整才有上下文（"上次说的博物馆"有指代）。
+            // 踩坑：必须显式传 CONVERSATION_ID——不传会落到 Advisor 的"default"桶，
+            // 内存版时代不可见，状态外置到 Redis 后才现形（外置存储的可观测性红利）
             memoryChatClient.prompt()
                     .user("（用户刚生成了" + destination + days + "日攻略，偏好：" + preferences + "，预算" + budget + "元）")
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, cid))
                     .call()
                     .content();
         }
         return it;
     }
 
-    /** M1 流式输出。 */
+    /**
+     * M1 流式输出。
+     */
     @GetMapping(value = "/plan/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
     public Flux<String> planStream(@RequestParam String destination,
                                    @RequestParam(defaultValue = "3") int days,
@@ -100,12 +107,12 @@ public class TravelController {
 
     /**
      * M4 多轮调整：cid + 自然语言请求（"第二天太赶了，换个轻松的"）。
-     *
+     * <p>
      * 增量设计（省 token 的关键）：
-     *  - 把【当前行程 JSON】注入 prompt，模型不需要从对话历史里"回忆"行程
-     *  - 指示模型只输出完整的新 Itinerary（含未变化的天）——反正 record 树不大，
-     *    但上下文里不用塞 20 条历史+长攻略原文，已经是数量级的节省
-     *  - 工具仍然可用：调整涉及新查天气/景点时模型自己会调
+     * - 把【当前行程 JSON】注入 prompt，模型不需要从对话历史里"回忆"行程
+     * - 指示模型只输出完整的新 Itinerary（含未变化的天）——反正 record 树不大，
+     * 但上下文里不用塞 20 条历史+长攻略原文，已经是数量级的节省
+     * - 工具仍然可用：调整涉及新查天气/景点时模型自己会调
      */
     @PostMapping("/plan/adjust")
     public Map<String, Object> adjust(@RequestBody AdjustRequest req) {
@@ -122,10 +129,10 @@ public class TravelController {
         String raw = memoryChatClient.prompt()
                 .user("""
                         用户对当前行程提出了调整请求：%s
-
+                        
                         当前行程（JSON）：
                         %s
-
+                        
                         请根据调整请求修改行程，输出修改后的【完整】行程（未提及的天保持原样）。
                         用户没明确要改的地方不要动。
                         %s
@@ -152,7 +159,9 @@ public class TravelController {
         );
     }
 
-    /** 防御性 JSON 提取：剥掉模型的前置思考/后置解释/```json 围栏，只留 JSON 本体 */
+    /**
+     * 防御性 JSON 提取：剥掉模型的前置思考/后置解释/```json 围栏，只留 JSON 本体
+     */
     private String extractJson(String raw) {
         int start = raw.indexOf('{');
         int end = raw.lastIndexOf('}');
@@ -193,8 +202,11 @@ public class TravelController {
         return new Itinerary(newIt.destination(), newIt.days(), newIt.totalBudget(), repaired, newIt.tips());
     }
 
-    /** 调整请求体 */
-    public record AdjustRequest(String cid, String request) {}
+    /**
+     * 调整请求体
+     */
+    public record AdjustRequest(String cid, String request) {
+    }
 
     /**
      * 行程 → JSON（给 prompt 用）。
@@ -210,7 +222,9 @@ public class TravelController {
         }
     }
 
-    /** 三种输出形态共用的需求 → prompt 构造 */
+    /**
+     * 三种输出形态共用的需求 → prompt 构造
+     */
     private String buildPrompt(String destination, int days, double budget, String preferences) {
         return """
                 请为我制定一份旅行攻略：
@@ -218,7 +232,7 @@ public class TravelController {
                 - 天数：%d 天
                 - 预算：约 %.0f 元
                 - 偏好：%s
-
+                
                 按天分段安排（上午/下午/晚上）。每天的第一行先写「当日天气」：
                 调用 getWeather 拿逐日预报，把该日的天气（温度区间/降雨概率）和对应注意事项
                 （带伞/防晒/穿衣/是否宜户外）写在标题下；预报覆盖不到的行程日按季节常识写。

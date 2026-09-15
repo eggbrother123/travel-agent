@@ -66,6 +66,12 @@
             <artifactId>spring-ai-starter-model-chat-memory</artifactId>
         </dependency>
 
+        <!-- E1 企业级演进：Redis 集中存储（对话记忆 + 行程状态，多实例共享的前提） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- 测试 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
