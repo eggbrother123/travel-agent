@@ -1,22 +1,48 @@
 package com.travel.agent.config;
 
+import com.travel.agent.observability.CostTrackingAdvisor;
 import com.travel.agent.tools.TravelTools;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 旅行智能体的 ChatClient 装配。
+ * 旅行智能体的 ChatClient 装配（集中管理「全局默认」）。
  *
- * 和 spring-ai-hello「每个 Controller 自己 build」不同——正式项目把系统提示词等
- * 「全局默认」集中在一处管理，Controller 只管发请求。
- * 后续里程碑都回到这一个 Bean 上叠加：M2 .defaultTools ✅，M4 加记忆 Advisor。
+ * 两台 client，同一套系统提示词+工具，差异只在 Advisor：
+ *  travelChatClient : [CostTracking]                                  —— 单次生成（无记忆）
+ *  memoryChatClient : [CostTracking, MessageChatMemory]               —— 多轮调整（有记忆）
+ *
+ * E3 起两台都挂 CostTrackingAdvisor（成本打点是最外层横切关注点，谁都不能免单）。
+ * 不用 mutate() 派生：advisor 列表的继承语义在不同版本有差异，显式装配最稳。
  */
 @Configuration
 public class TravelChatConfig {
 
+    /** 无记忆版：/plan、/plan/stream、/plan/struct 主生成 */
     @Bean
-    public ChatClient travelChatClient(ChatClient.Builder builder, TravelTools travelTools) {
+    public ChatClient travelChatClient(ChatClient.Builder builder, TravelTools travelTools,
+                                       CostTrackingAdvisor costTrackingAdvisor) {
+        return baseClient(builder, travelTools)
+                .defaultAdvisors(costTrackingAdvisor)
+                .build();
+    }
+
+    /** 记忆版：/plan/adjust 与 /plan/struct 生成后的初始上下文补写 */
+    @Bean
+    public ChatClient memoryChatClient(ChatClient.Builder builder, TravelTools travelTools,
+                                       CostTrackingAdvisor costTrackingAdvisor,
+                                       ChatMemory chatMemory) {
+        return baseClient(builder, travelTools)
+                .defaultAdvisors(costTrackingAdvisor,
+                        MessageChatMemoryAdvisor.builder(chatMemory).build())
+                .build();
+    }
+
+    /** 公共底座：系统提示词 + 工具（两台 client 的差异只在 advisor，其余必须一致） */
+    private ChatClient.Builder baseClient(ChatClient.Builder builder, TravelTools travelTools) {
         return builder
                 .defaultSystem("""
                         你是一位专业的旅行规划师，用户叫你「智能小旅」。
@@ -39,7 +65,6 @@ public class TravelChatConfig {
                         - 工具返回「暂不支持/暂无」时：基于常识补充，但明确标注这部分未经核实；
                           支持列表内的城市尽量优先用工具数据
                         """)
-                .defaultTools(travelTools)   // M2：工具成为全局默认，所有走 travelChatClient 的请求都能用
-                .build();
+                .defaultTools(travelTools);   // M2：工具成为全局默认，两台 client 都能用
     }
 }

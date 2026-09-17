@@ -30,4 +30,20 @@ spring:
           model: bge-m3      # Day4 实测：中文召回精准
 
 server:
-  port: 8081                 # 8080 留给 spring-ai-hello，两个项目可同时跑
+  port: 8081 # 8080 留给 spring-ai-hello，两个项目可同时跑
+
+# E3 可观测性：暴露 metrics（含 Spring AI 原生 chat observation + 自定义成本打点）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  metrics:
+    tags:
+      application: travel-agent
+
+# E3 成本估算单价（¥/百万 token，deepseek-chat 官方价目表调整时只改这里）
+travel:
+  cost:
+    input-per-million: 2.0
+    output-per-million: 8.0

@@ -301,7 +301,9 @@
                 sk.remove();
                 resultDiv.appendChild(renderItinerary(it));
                 resultDiv.appendChild(buildAdjustBox());
-                statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+                // E3：后端 X-Travel-Cost 响应头带回来的账单（token/成本/工具轮次）
+                const cost = resp.headers.get('X-Travel-Cost');
+                statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s` + (cost ? ` · ${cost}` : '');
             } catch (e) {
                 sk.remove();
                 throw e;
@@ -360,7 +362,9 @@
                 // 局部重渲染：新旧行程 diff，变化的天高亮
                 rerenderWithDiff(currentIt, data.itinerary);
                 currentIt = data.itinerary;
-                statusEl.textContent = `调整完成（${((performance.now() - t0) / 1000).toFixed(1)}s，会话记忆 ${data['记忆条数']} 条）`;
+                const c = data['成本'];
+                const costTxt = c ? ` · ${c.promptTokens}/${c.completionTokens} tok · ≈¥${Number(c.costCny).toFixed(4)}` : '';
+                statusEl.textContent = `调整完成（${((performance.now() - t0) / 1000).toFixed(1)}s，记忆 ${data['记忆条数']} 条${costTxt}）`;
                 input.value = '';
             } catch (e) {
                 statusEl.textContent = '出错了：' + e.message;

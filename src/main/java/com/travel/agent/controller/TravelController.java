@@ -1,9 +1,10 @@
 package com.travel.agent.controller;
 
 import com.travel.agent.domain.Itinerary;
+import com.travel.agent.observability.CostTrackingAdvisor;
 import com.travel.agent.service.ItinerarySessionService;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.http.MediaType;
@@ -34,13 +35,11 @@ public class TravelController {
     private final ItinerarySessionService sessionService;
 
     public TravelController(ChatClient travelChatClient,
+                            ChatClient memoryChatClient,
                             ItinerarySessionService sessionService) {
         this.travelChatClient = travelChatClient;
+        this.memoryChatClient = memoryChatClient;   // E3 起两台 client 都在 TravelChatConfig 集中装配
         this.sessionService = sessionService;
-        // 带记忆的 ChatClient：复用全局默认（系统提示词+工具），叠加记忆 Advisor
-        this.memoryChatClient = travelChatClient.mutate()
-                .defaultAdvisors(MessageChatMemoryAdvisor.builder(sessionService.chatMemory()).build())
-                .build();
     }
 
     /**
@@ -66,7 +65,8 @@ public class TravelController {
                                 @RequestParam(defaultValue = "3") int days,
                                 @RequestParam(defaultValue = "5000") double budget,
                                 @RequestParam(defaultValue = "不限") String preferences,
-                                @RequestParam(required = false) String cid) {
+                                @RequestParam(required = false) String cid,
+                                HttpServletResponse httpResponse) {
         // 防御性结构化输出：工具调用+entity 组合下 DeepSeek 偶尔先输出思考再给 JSON（实测两种接口都踩过），
         // 统一走 BeanOutputConverter + extractJson 剥离思考文字
         BeanOutputConverter<Itinerary> converter = new BeanOutputConverter<>(Itinerary.class);
@@ -76,6 +76,9 @@ public class TravelController {
                 .call()
                 .content();
         Itinerary it = converter.convert(extractJson(raw));
+
+        // 主生成的账单要趁早取走——下面的记忆补写也是一次模型调用，会覆盖 ThreadLocal 快照
+        CostTrackingAdvisor.CostSnapshot cost = CostTrackingAdvisor.takeSnapshot();
 
         if (cid != null && !cid.isBlank()) {
             sessionService.saveItinerary(cid, it);
@@ -87,6 +90,10 @@ public class TravelController {
                     .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, cid))
                     .call()
                     .content();
+            CostTrackingAdvisor.takeSnapshot();  // 丢弃补写的小账单（日志里已记）
+        }
+        if (cost != null) {
+            httpResponse.setHeader("X-Travel-Cost", cost.briefAscii());   // 值必须纯 ASCII（见 briefAscii 注释）
         }
         return it;
     }
@@ -152,11 +159,16 @@ public class TravelController {
         updated = backfillMissing(current, updated);
 
         sessionService.saveItinerary(req.cid(), updated);
-        return Map.of(
+        CostTrackingAdvisor.CostSnapshot cost = CostTrackingAdvisor.takeSnapshot();
+        var result = new java.util.HashMap<String, Object>(Map.of(
                 "cid", req.cid(),
                 "itinerary", updated,
                 "记忆条数", sessionService.memorySize(req.cid())
-        );
+        ));
+        if (cost != null) {
+            result.put("成本", cost);   // E3：账单随响应透出（前端状态栏展示）
+        }
+        return result;
     }
 
     /**

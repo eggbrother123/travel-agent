@@ -1,5 +1,6 @@
 package com.travel.agent.tools;
 
+import com.travel.agent.observability.ToolCallTracker;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
@@ -30,6 +31,13 @@ import java.util.stream.Collectors;
 public class TravelTools {
 
     private final VectorStore travelVectorStore;
+    private final ToolCallTracker tracker;
+
+    public TravelTools(VectorStore travelVectorStore,
+                       ToolCallTracker tracker) {
+        this.travelVectorStore = travelVectorStore;
+        this.tracker = tracker;
+    }
 
     /** wttr.in 只认英文城市名（中文实测 location not found）——知识库 6 城映射 + 常见城市兜底 */
     private static final Map<String, String> CITY_TO_EN = Map.ofEntries(
@@ -71,10 +79,6 @@ public class TravelTools {
             "HKD", 1.09
     );
 
-    public TravelTools(VectorStore travelVectorStore) {
-        this.travelVectorStore = travelVectorStore;
-    }
-
     /**
      * 查目的地天气（M5：真实数据 + 逐日预报）。wttr.in 免费无 key。
      * 返回当前实况 + 未来 3 天逐日预报（温度区间/降雨概率/UV）——模型把每天的
@@ -85,6 +89,7 @@ public class TravelTools {
     @Tool(description = "查询目的地城市的实时天气和未来3天逐日天气预报（含每日温度区间、降雨概率、紫外线指数）。生成行程时调用，把每天的天气写进对应日期的行程安排和注意事项里")
     public String getWeather(@ToolParam(description = "城市名称，如：东京、北京、杭州") String city) {
         System.out.println(">>> [工具] getWeather city=" + city);
+        tracker.record("getWeather");
         String name = city.trim();
         String en = CITY_TO_EN.get(name);
 
@@ -153,6 +158,7 @@ public class TravelTools {
             @ToolParam(description = "目的地城市，如：东京、北京") String destination,
             @ToolParam(description = "主题关键词，如：美食、博物馆、地标、户外、交通") String keyword) {
         System.out.println(">>> [工具] searchAttractions(RAG) destination=" + destination + ", keyword=" + keyword);
+        tracker.record("searchAttractions");
 
         // 查询 = 城市 + 主题：主题词负责语义匹配
         // 过滤 = metadata city 字段：把检索范围锁在该城市（不然 topK 全库搜会混进别的城市，
@@ -191,6 +197,7 @@ public class TravelTools {
             @ToolParam(description = "目标货币代码") String to,
             @ToolParam(description = "金额") double amount) {
         System.out.println(">>> [工具] exchangeCurrency " + amount + " " + from + " -> " + to);
+        tracker.record("exchangeCurrency");
         Double fromRate = RATES_FROM_CNY.get(from.toUpperCase());
         Double toRate = RATES_FROM_CNY.get(to.toUpperCase());
         if (fromRate == null || toRate == null) {
@@ -207,6 +214,7 @@ public class TravelTools {
     @Tool(description = "查询目的地的实用旅行贴士（交通卡、门票预约、现金、安全注意事项等）。生成攻略的贴士部分前调用")
     public String getTravelTips(@ToolParam(description = "目的地城市") String destination) {
         System.out.println(">>> [工具] getTravelTips(RAG) destination=" + destination);
+        tracker.record("getTravelTips");
         List<Document> hits = travelVectorStore.similaritySearch(
                 SearchRequest.builder()
                         .query(destination + " 交通 门票预约 现金 安全 注意事项")
@@ -228,6 +236,7 @@ public class TravelTools {
     @Tool(description = "获取今天的日期和星期。判断景点闭馆日（如周一闭馆）、季节推荐时使用")
     public String getCurrentDate() {
         System.out.println(">>> [工具] getCurrentDate");
+        tracker.record("getCurrentDate");
         return LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd (E)"));
     }
 }

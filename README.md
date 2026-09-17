@@ -123,7 +123,7 @@ src/main/resources/
 |---|---|---|---|
 | ~~内存 ChatMemory + Map~~ | Redis 集中存储 | 多实例部署记忆串话 | ✅ E1 完成（2026-09-10） |
 | SimpleVectorStore | Milvus/PGVector + 增量索引 | 向量库选型、索引更新 | ⬜ |
-| System.out 日志 | Micrometer token/延迟/成本打点 | 可观测性 | ⬜ |
+| ~~System.out 日志~~ | Micrometer token/延迟/成本打点 | 可观测性 | ✅ E3 完成（2026-09-17） |
 | 裸接口 | 限流 + PII 脱敏 | 安全层 | ⬜ |
 | 全 deepseek-chat | 分级模型 + FAQ 缓存 | 成本优化 | ⬜ |
 | 手动起服务 | Docker Compose 全栈 | 部署 | ⬜ |
@@ -136,3 +136,14 @@ src/main/resources/
 - ItinerarySessionService 重构为构造器注入（依赖倒置：存储策略可替换）
 - **实测**：①跨重启状态连续性——重启后同 cid 直接调整成功，Day2 保持重启前的购物版、记忆 4→6 条累加；②redis-cli 可见真实 key（travel:chat:{cid} 4 条、travel:itinerary:{cid} TTL 86337s）；③Redis 故障（错端口 8082 实例）struct/adjust 全 200 + 降级日志
 - **踩坑**：/plan/struct 写初始记忆漏传 CONVERSATION_ID → 落到 Advisor 默认"default"桶——内存版时代不可见，外置到 Redis 才现形（外置存储的可观测性红利）
+
+### E3 可观测性：token/延迟/成本打点（2026-09-17）✅
+
+- **CostTrackingAdvisor**（CallAdvisor，order -100 最外层）：一次请求一份账单——墙钟延迟 / token 输入输出 / 工具轮数 / 按单价估算成本（¥）。三条出口：控制台日志一行账单、Micrometer 指标（/actuator/metrics + /actuator/prometheus，Grafana 即插即用）、ThreadLocal 快照随响应透出（struct→X-Travel-Cost 响应头，adjust→响应体"成本"字段，前端状态栏展示）
+- **ToolCallTracker**：每个 @Tool 方法报数 → travel.tool.calls{tool=xx} 按工具分 tag；请求级 ThreadLocal 计数得出"本次几轮工具调用"
+- 单价配置化：travel.cost.input/output-per-million（官方调价只改 yml）
+- **实测数字**（deepseek-chat，杭州 2 日）：主生成 10740ms / in 7148 + out 1768 tok / 6 工具轮 / ¥0.0284；adjust 6576ms / ¥0.0195
+- **打点立刻暴露的浪费**：/plan/struct 生成后"补写一句初始上下文"走了带全套工具的 memoryChatClient——模型为这句废话又调了 4 轮工具、烧 4161 输入 token（¥0.0184，占主生成成本 65%）。E5 优化方向：补写用无工具轻量 client
+- 踩坑①：Spring AI 1.0.0 GA 的 Advisor 签名是 `adviseCall(ChatClientRequest, CallAdvisorChain) → ChatClientResponse`（不是旧文档的 AdvisedRequest/ChatResponse），编译器当老师
+- 踩坑②：**Tomcat 对非 ASCII 的 header 值静默丢弃**——X-Travel-Cost 值含中文时整个 header 凭空消失、零报错；同位置纯 ASCII 值正常。header 值必须 ASCII（或 RFC 5987 编码）
+- 诚实边界：ChatResponse 的 Usage 只是最后一轮模型调用的用量，工具中间轮次拿不到（全量靠 Spring AI 原生 per-call observation）；流式接口未接（StreamAdvisor + usage 聚合 TODO）
