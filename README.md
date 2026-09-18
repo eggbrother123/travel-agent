@@ -124,7 +124,7 @@ src/main/resources/
 | ~~内存 ChatMemory + Map~~ | Redis 集中存储 | 多实例部署记忆串话 | ✅ E1 完成（2026-09-10） |
 | SimpleVectorStore | Milvus/PGVector + 增量索引 | 向量库选型、索引更新 | ⬜ |
 | ~~System.out 日志~~ | Micrometer token/延迟/成本打点 | 可观测性 | ✅ E3 完成（2026-09-17） |
-| 裸接口 | 限流 + PII 脱敏 | 安全层 | ⬜ |
+| ~~裸接口~~ | 限流 + PII 脱敏 | 安全层 | ✅ E4 完成（2026-09-18） |
 | 全 deepseek-chat | 分级模型 + FAQ 缓存 | 成本优化 | ⬜ |
 | 手动起服务 | Docker Compose 全栈 | 部署 | ⬜ |
 
@@ -147,3 +147,11 @@ src/main/resources/
 - 踩坑①：Spring AI 1.0.0 GA 的 Advisor 签名是 `adviseCall(ChatClientRequest, CallAdvisorChain) → ChatClientResponse`（不是旧文档的 AdvisedRequest/ChatResponse），编译器当老师
 - 踩坑②：**Tomcat 对非 ASCII 的 header 值静默丢弃**——X-Travel-Cost 值含中文时整个 header 凭空消失、零报错；同位置纯 ASCII 值正常。header 值必须 ASCII（或 RFC 5987 编码）
 - 诚实边界：ChatResponse 的 Usage 只是最后一轮模型调用的用量，工具中间轮次拿不到（全量靠 Spring AI 原生 per-call observation）；流式接口未接（StreamAdvisor + usage 聚合 TODO）
+
+### E4 安全层：限流 + PII 脱敏（2026-09-18）✅
+
+- **RateLimitFilter**（OncePerRequestFilter 拦 /plan*）：按 IP 固定窗口计数——**Redis Lua 原子 INCR+EXPIRE**（两步分离的经典坑：INCR 后挂掉 EXPIRE 未执行 → key 永不过期 → 永久限流），超限 429 + Retry-After + 中文文案。为什么 Redis 不用 Guava RateLimiter：单机令牌桶 N 实例 = N 倍放行，集中计数才语义正确（复用 E1 的 Redis，零新依赖）。fail-open 取舍：限流器故障放行（保护措施不是业务依赖，裸奔费钱好过全瘫；防攻击场景才 fail-close）
+- **PiiSanitizer**：入口层正则脱敏（身份证→银行卡→手机→邮箱，长规则先匹配防子串竞争），保留首尾片段；审计只记类型不记原文（否则日志自己成泄漏点）；buildPrompt 是 prompt 唯一收口点，adjust 请求体同脱敏
+- 实测：连打 7 次 → 前 5 次放行（400 业务错误证明穿过过滤器）、第 6/7 次 429；Retry-After: 60；redis-cli 可见 travel:ratelimit:{ip}；带手机号+邮箱的请求 → 日志 `脱敏 phone x1 / email x1`，**原始手机号输出 0 次出现**
+- metrics：travel.pii.masked{type} / travel.ratelimit.rejected 均入 Prometheus
+- 诚实边界：固定窗口有边界突刺（2 秒内可 2N），人肉点按钮场景够用不提前上滑窗；正则脱敏是保守防御，格式变体会漏，企业级叠 NER 做第二层

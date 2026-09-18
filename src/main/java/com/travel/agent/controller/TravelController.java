@@ -2,6 +2,7 @@ package com.travel.agent.controller;
 
 import com.travel.agent.domain.Itinerary;
 import com.travel.agent.observability.CostTrackingAdvisor;
+import com.travel.agent.security.PiiSanitizer;
 import com.travel.agent.service.ItinerarySessionService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.ai.chat.client.ChatClient;
@@ -33,13 +34,16 @@ public class TravelController {
     private final ChatClient travelChatClient;
     private final ChatClient memoryChatClient;   // 带记忆 Advisor 的实例：多轮调整专用
     private final ItinerarySessionService sessionService;
+    private final PiiSanitizer piiSanitizer;
 
     public TravelController(ChatClient travelChatClient,
                             ChatClient memoryChatClient,
-                            ItinerarySessionService sessionService) {
+                            ItinerarySessionService sessionService,
+                            PiiSanitizer piiSanitizer) {
         this.travelChatClient = travelChatClient;
         this.memoryChatClient = memoryChatClient;   // E3 起两台 client 都在 TravelChatConfig 集中装配
         this.sessionService = sessionService;
+        this.piiSanitizer = piiSanitizer;
     }
 
     /**
@@ -133,6 +137,7 @@ public class TravelController {
         // 改用 BeanOutputConverter（entity 的底层机制）+ 防御性 JSON 提取：
         // 截取第一个 { 到最后一个 }，思考文字/代码块围栏都被剥掉。
         BeanOutputConverter<Itinerary> converter = new BeanOutputConverter<>(Itinerary.class);
+        String sanitizedRequest = piiSanitizer.sanitize(req.request());   // E4：请求体先脱敏再进 prompt
         String raw = memoryChatClient.prompt()
                 .user("""
                         用户对当前行程提出了调整请求：%s
@@ -143,7 +148,7 @@ public class TravelController {
                         请根据调整请求修改行程，输出修改后的【完整】行程（未提及的天保持原样）。
                         用户没明确要改的地方不要动。
                         %s
-                        """.formatted(req.request(), toJson(current), converter.getFormat()))
+                        """.formatted(sanitizedRequest, toJson(current), converter.getFormat()))
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, req.cid()))
                 .call()
                 .content();
@@ -235,7 +240,9 @@ public class TravelController {
     }
 
     /**
-     * 三种输出形态共用的需求 → prompt 构造
+     * 三种输出形态共用的需求 → prompt 构造。
+     * E4：这里是对模型 prompt 的唯一收口点——用户可控输入（目的地/偏好）在此脱敏，
+     * PII 不进 prompt = 不出域发给模型厂商。
      */
     private String buildPrompt(String destination, int days, double budget, String preferences) {
         return """
@@ -244,11 +251,12 @@ public class TravelController {
                 - 天数：%d 天
                 - 预算：约 %.0f 元
                 - 偏好：%s
-                
+
                 按天分段安排（上午/下午/晚上）。每天的第一行先写「当日天气」：
                 调用 getWeather 拿逐日预报，把该日的天气（温度区间/降雨概率）和对应注意事项
                 （带伞/防晒/穿衣/是否宜户外）写在标题下；预报覆盖不到的行程日按季节常识写。
                 每天结尾给出当日花费估算，最后给整体花费合计和实用贴士。
-                """.formatted(destination, days, budget, preferences);
+                """.formatted(piiSanitizer.sanitize(destination), days, budget,
+                piiSanitizer.sanitize(preferences));
     }
 }

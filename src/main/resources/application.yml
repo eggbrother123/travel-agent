@@ -43,7 +43,10 @@ management:
       application: travel-agent
 
 # E3 成本估算单价（¥/百万 token，deepseek-chat 官方价目表调整时只改这里）
+# E4 限流：按 IP 固定窗口（次/分钟），拦 /plan* 生成接口
 travel:
   cost:
     input-per-million: 2.0
     output-per-million: 8.0
+  ratelimit:
+    requests-per-minute: 5
