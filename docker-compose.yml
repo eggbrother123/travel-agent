@@ -1,0 +1,51 @@
+# E6 全栈编排：一条 `docker compose up -d --build` 起完整环境
+#
+# 网络设计：redis/pgvector 不映射宿主端口——app 走 compose 内部网络按服务名访问
+#（也避开宿主机已有的 Windows Redis:6379 和 travel-pgvector:5433 冲突）。
+# 宿主直连方式：docker compose exec pgvector psql -U travel -d travelagent
+#
+# Ollama 不进容器：bge-m3 1.2GB 模型放宿主机，app 通过 host.docker.internal 直连
+#（Docker Desktop 特有域名）。要在纯 Linux 跑：加 network_mode 或 extra_hosts 指宿主 IP。
+services:
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    volumes:
+      - redis-data:/data
+
+  pgvector:
+    image: docker.m.daocloud.io/pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: travel
+      POSTGRES_PASSWORD: travel123
+      POSTGRES_DB: travelagent
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    # vector 扩展由 app 的 initializeSchema 建（PGVectorStore schema 脚本含 CREATE EXTENSION）
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel -d travelagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      redis:
+        condition: service_started
+      pgvector:
+        condition: service_healthy   # 等 PG 就绪再启 app（避免 datasource 初始化竞争）
+    environment:
+      # 容器内用服务名替换 yml 里的 127.0.0.1（零代码改动，本地跑不受影响）
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATASOURCE_URL: jdbc:postgresql://pgvector:5432/travelagent
+      SPRING_DATASOURCE_USERNAME: travel
+      SPRING_DATASOURCE_PASSWORD: travel123
+      # bge-m3 embedding 连宿主机 Ollama（relaxed binding: base-url → BASEURL）
+      SPRING_AI_OLLAMA_BASEURL: http://host.docker.internal:11434
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+    ports:
+      - "8081:8081"
+
+volumes:
+  redis-data:
+  pg-data:

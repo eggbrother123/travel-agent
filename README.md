@@ -72,11 +72,17 @@
 
 ## 快速开始
 
-前置：JDK 17+ / Maven / 环境变量 `DEEPSEEK_API_KEY`（M3 起还需本地 Ollama + bge-m3 模型）
+**方式一：Docker Compose 一键全栈**（推荐，E6）——前置：Docker + 环境变量 `DEEPSEEK_API_KEY` + 宿主机 Ollama（已 pull bge-m3）
+
+```bash
+docker compose up -d --build
+# 打开 http://localhost:8081/ ；查看日志：docker compose logs -f app
+```
+
+**方式二：本地裸跑**——前置：JDK 17+ / Maven / Redis(6379) / PGVector(5433) / Ollama / `DEEPSEEK_API_KEY`
 
 ```bash
 mvn spring-boot:run
-# 打开 http://localhost:8081/
 # 或裸接口：
 # http://localhost:8081/plan?destination=东京&days=3&budget=8000&preferences=美食,博物馆
 ```
@@ -122,11 +128,11 @@ src/main/resources/
 | 现在 | 目标 | 面试考点 | 状态 |
 |---|---|---|---|
 | ~~内存 ChatMemory + Map~~ | Redis 集中存储 | 多实例部署记忆串话 | ✅ E1 完成（2026-09-10） |
-| SimpleVectorStore | Milvus/PGVector + 增量索引 | 向量库选型、索引更新 | ⬜ |
+| ~~SimpleVectorStore~~ | Milvus/PGVector + 增量索引 | 向量库选型、索引更新 | ✅ E2 完成（2026-09-20） |
 | ~~System.out 日志~~ | Micrometer token/延迟/成本打点 | 可观测性 | ✅ E3 完成（2026-09-17） |
-| 裸接口 | 限流 + PII 脱敏 | 安全层 | ⬜ |
-| 全 deepseek-chat | 分级模型 + FAQ 缓存 | 成本优化 | ⬜ |
-| 手动起服务 | Docker Compose 全栈 | 部署 | ⬜ |
+| ~~裸接口~~ | 限流 + PII 脱敏 | 安全层 | ✅ E4 完成（2026-09-18） |
+| ~~全 deepseek-chat~~ | 分级模型 + FAQ 缓存 | 成本优化 | ✅ E5 完成（2026-09-20） |
+| ~~手动起服务~~ | Docker Compose 全栈 | 部署 | ✅ E6 完成（2026-09-21）**全部收官** |
 
 ### E1 Redis 集中存储（2026-09-10）✅
 
@@ -147,3 +153,37 @@ src/main/resources/
 - 踩坑①：Spring AI 1.0.0 GA 的 Advisor 签名是 `adviseCall(ChatClientRequest, CallAdvisorChain) → ChatClientResponse`（不是旧文档的 AdvisedRequest/ChatResponse），编译器当老师
 - 踩坑②：**Tomcat 对非 ASCII 的 header 值静默丢弃**——X-Travel-Cost 值含中文时整个 header 凭空消失、零报错；同位置纯 ASCII 值正常。header 值必须 ASCII（或 RFC 5987 编码）
 - 诚实边界：ChatResponse 的 Usage 只是最后一轮模型调用的用量，工具中间轮次拿不到（全量靠 Spring AI 原生 per-call observation）；流式接口未接（StreamAdvisor + usage 聚合 TODO）
+
+### E4 安全层：限流 + PII 脱敏（2026-09-18）✅
+
+- **RateLimitFilter**（OncePerRequestFilter 拦 /plan*）：按 IP 固定窗口计数——**Redis Lua 原子 INCR+EXPIRE**（两步分离的经典坑：INCR 后挂掉 EXPIRE 未执行 → key 永不过期 → 永久限流），超限 429 + Retry-After + 中文文案。为什么 Redis 不用 Guava RateLimiter：单机令牌桶 N 实例 = N 倍放行，集中计数才语义正确（复用 E1 的 Redis，零新依赖）。fail-open 取舍：限流器故障放行（保护措施不是业务依赖，裸奔费钱好过全瘫；防攻击场景才 fail-close）
+- **PiiSanitizer**：入口层正则脱敏（身份证→银行卡→手机→邮箱，长规则先匹配防子串竞争），保留首尾片段；审计只记类型不记原文（否则日志自己成泄漏点）；buildPrompt 是 prompt 唯一收口点，adjust 请求体同脱敏
+- 实测：连打 7 次 → 前 5 次放行（400 业务错误证明穿过过滤器）、第 6/7 次 429；Retry-After: 60；redis-cli 可见 travel:ratelimit:{ip}；带手机号+邮箱的请求 → 日志 `脱敏 phone x1 / email x1`，**原始手机号输出 0 次出现**
+- metrics：travel.pii.masked{type} / travel.ratelimit.rejected 均入 Prometheus
+- 诚实边界：固定窗口有边界突刺（2 秒内可 2N），人肉点按钮场景够用不提前上滑窗；正则脱敏是保守防御，格式变体会漏，企业级叠 NER 做第二层
+
+### E5 成本优化：消灭浪费 + 缓存直达（2026-09-20）✅
+
+- **E5-A 补写直写记忆（模型调用 1→0）**：/plan/struct 生成后的"初始上下文补写"原来走 memoryChatClient——E3 打点实测它占主生成成本 65%（4 轮工具 + 4161 tok + 8.8s）。洞察：**写记忆不需要生成能力**——直接 chatMemory.add() 写一条事实，改后 struct 的 [成本] 日志从 2 条变 1 条。反思（面试金句）：Advisor 的自动记忆机制让人忘了"写记忆"和"调模型"是两件事
+- **E5-B 生成结果缓存（缓存直达）**：GenerationCache——相同参数（脱敏后 md5 指纹）TTL 24h（配置化），命中直接返回 + 绑定会话（0 模型调用）；X-Cache: HIT/MISS 头 + travel.cache{result} 指标 + 前端"⚡缓存命中"提示。**实测：同参第二次请求 8ms（vs 首次 11.8s）**。诚实边界：缓存 key 用脱敏值（PII 变体打不穿缓存也不进 key）；生成器类应用命中率取决于重复请求占比，个性化场景收益低
+- 连带修复：E4 复查发现旧版补写路径未脱敏（PII 会随上下文发给厂商+落 Redis 记忆+被后续 adjust 读回 prompt）——E5 重构时全路径收口
+- 优化方法论闭环：**E3 打点发现浪费 → E5 定位根因（不需要模型）→ 消灭而非优化 → E3 打点验证收益**（struct 成本日志 2→1 条、缓存命中延迟 1500 倍改善）
+
+### E2 向量库：SimpleVectorStore → PGVector（2026-09-20）✅
+
+- 部署：Docker 容器 travel-pgvector（pgvector/pgvector:pg16，端口 5433 防冲突；国内网络用 docker.m.daocloud.io 镜像源拉取）+ vector 扩展
+- 代码：spring-ai-starter-vector-store-pgvector + postgresql 驱动；PgVectorStore.builder(jdbcTemplate, embeddingModel).**dimensions(1024)**（bge-m3 维度——默认 1536 是 OpenAI 的，会炸）.initializeSchema(true)
+- **持久化 + 跳过重建**：KnowledgeLoader 在 ApplicationReadyEvent 检查表空才灌全量——重启实测 `已有 12 条向量，跳过建库`，启动 2.1s（旧版每次启动重新向量化全量文档）。诚实边界：真增量（文件变更检测+按 id upsert+删除同步）是 TODO，当前文档集不变 YAGNI
+- **filterExpression 兼容验证**：city 过滤翻译成 jsonb 查询，实测 `检索命中 2 块，来源：杭州` 纯净无跨城市污染
+- 选型讲点：12 chunks 用 Milvus 是高射炮打蚊子（standalone 要 etcd+minio 三容器）；PGVector 一个 PG 全搞定白送 SQL 生态；千万级向量再换 Milvus——**选型跟数据量走，不跟热度走**
+- 踩坑：initializeSchema 的建表在 afterPropertiesSet 生命周期回调——@Bean 方法体内直接 COUNT/写入会赶在建表前炸 `relation "vector_store" does not exist`；灌数逻辑放 ApplicationReadyEvent（启动完成后跑，不阻塞启动，也是生产惯例）
+
+### E6 部署：Docker Compose 全栈一键起（2026-09-21）✅ **演进路线收官**
+
+- 三服务编排：`docker compose up -d --build` 一条命令 = app（多阶段构建）+ redis:7-alpine + pgvector/pg16，healthcheck 门控（pg_isready 就绪才启 app，避免 datasource 竞争）
+- **多阶段 Dockerfile**：maven 打包层（依赖 go-offline 单独缓存层，pom 不变二次构建秒过）→ JRE 运行层；容器内 maven 配阿里云 mirror（docker-settings.xml）加速依赖
+- **网络设计**：redis/pgvector 不映射宿主端口（app 走 compose 内部服务名，同时避开宿主已有 Redis/pgvector 冲突）；配置全走环境变量覆盖（SPRING_DATA_REDIS_HOST=redis 等，零代码改动，本地裸跑不受影响）
+- **Ollama 不进容器**：bge-m3 1.2GB 放宿主机，app 经 host.docker.internal 直连（Docker Desktop 特有；纯 Linux 要改 extra_hosts）
+- 全部镜像走 daocloud 镜像源（Hub 直连被墙）；**不要加 `# syntax=docker/dockerfile:1`**——BuildKit 会去 Hub 拉 frontend，被墙必炸（实测踩坑）
+- 端到端实测（全新环境零手工）：compose 起 → 新 PG 卷自动灌 12 chunks（容器→宿主 Ollama embedding 通）→ struct 生成 11.1s/8 工具轮/¥0.0321/RAG 来源纯净 → 同参二连 11.8ms 缓存命中 → compose redis 里五类 key 齐全（chat/itinerary/cache/ratelimit）
+- 实测观察（诚实记录）：**端口映射后限流 IP 是 docker 网关 172.18.0.1**——所有外部流量共享一个桶。代码已优先读 X-Forwarded-For，真实 LB 部署正确；本地 port-mapping 场景人人共享限流额度，属 NAT 语义不是 bug
