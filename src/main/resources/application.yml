@@ -2,6 +2,12 @@ spring:
   application:
     name: travel-agent
 
+  # E2：PGVector 向量库（Docker 容器 travel-pgvector，映射 5433 避开本机可能的 5432）
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5433/travelagent
+    username: travel
+    password: travel123
+
   # E1：Redis 集中存储（对话记忆+行程状态）。超时 2s 保证 Redis 故障时快速降级而不是干等
   data:
     redis:
@@ -43,7 +49,13 @@ management:
       application: travel-agent
 
 # E3 成本估算单价（¥/百万 token，deepseek-chat 官方价目表调整时只改这里）
+# E4 限流：按 IP 固定窗口（次/分钟），拦 /plan* 生成接口
 travel:
   cost:
     input-per-million: 2.0
     output-per-million: 8.0
+  ratelimit:
+    requests-per-minute: 5
+  # E5 生成结果缓存（小时）——天气是生成时刻快照，缓存期内不刷新
+  cache:
+    ttl-hours: 24
