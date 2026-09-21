@@ -2,10 +2,13 @@ package com.travel.agent.controller;
 
 import com.travel.agent.domain.Itinerary;
 import com.travel.agent.observability.CostTrackingAdvisor;
+import com.travel.agent.security.PiiSanitizer;
+import com.travel.agent.service.GenerationCache;
 import com.travel.agent.service.ItinerarySessionService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -33,13 +36,19 @@ public class TravelController {
     private final ChatClient travelChatClient;
     private final ChatClient memoryChatClient;   // 带记忆 Advisor 的实例：多轮调整专用
     private final ItinerarySessionService sessionService;
+    private final PiiSanitizer piiSanitizer;
+    private final GenerationCache generationCache;
 
     public TravelController(ChatClient travelChatClient,
                             ChatClient memoryChatClient,
-                            ItinerarySessionService sessionService) {
+                            ItinerarySessionService sessionService,
+                            PiiSanitizer piiSanitizer,
+                            GenerationCache generationCache) {
         this.travelChatClient = travelChatClient;
         this.memoryChatClient = memoryChatClient;   // E3 起两台 client 都在 TravelChatConfig 集中装配
         this.sessionService = sessionService;
+        this.piiSanitizer = piiSanitizer;
+        this.generationCache = generationCache;
     }
 
     /**
@@ -67,31 +76,50 @@ public class TravelController {
                                 @RequestParam(defaultValue = "不限") String preferences,
                                 @RequestParam(required = false) String cid,
                                 HttpServletResponse httpResponse) {
+        // E4：参数先脱敏——之后进 prompt、进记忆、进缓存 key 的都是干净值（一处脱敏三处受益）
+        String cleanDest = piiSanitizer.sanitize(destination);
+        String cleanPrefs = piiSanitizer.sanitize(preferences);
+
+        // E5：缓存直达——相同参数 TTL 内不调模型。命中也绑定会话（adjust 才有状态），这些操作零模型调用
+        var cached = generationCache.get(cleanDest, days, budget, cleanPrefs);
+        if (cached.isPresent()) {
+            if (cid != null && !cid.isBlank()) {
+                sessionService.saveItinerary(cid, cached.get());
+                sessionService.chatMemory().add(cid, new UserMessage(
+                        "（用户刚生成了" + cleanDest + days + "日攻略，偏好：" + cleanPrefs + "，预算" + budget + "元）"));
+            }
+            httpResponse.setHeader("X-Cache", "HIT");
+            httpResponse.setHeader("X-Travel-Cost", "0ms | cache hit | ~CNY:0.0000");
+            return cached.get();
+        }
+
         // 防御性结构化输出：工具调用+entity 组合下 DeepSeek 偶尔先输出思考再给 JSON（实测两种接口都踩过），
         // 统一走 BeanOutputConverter + extractJson 剥离思考文字
         BeanOutputConverter<Itinerary> converter = new BeanOutputConverter<>(Itinerary.class);
         String raw = travelChatClient.prompt()
-                .user(buildPrompt(destination, days, budget, preferences)
+                .user(buildPrompt(cleanDest, days, budget, cleanPrefs)
                         + "\n\n请以结构化的行程格式输出，" + converter.getFormat())
                 .call()
                 .content();
         Itinerary it = converter.convert(extractJson(raw));
+        generationCache.put(cleanDest, days, budget, cleanPrefs, it);   // E5：入缓存供后续同参请求直达
 
-        // 主生成的账单要趁早取走——下面的记忆补写也是一次模型调用，会覆盖 ThreadLocal 快照
+        // 主生成的账单
         CostTrackingAdvisor.CostSnapshot cost = CostTrackingAdvisor.takeSnapshot();
 
         if (cid != null && !cid.isBlank()) {
             sessionService.saveItinerary(cid, it);
-            // 初始需求也写进对话记忆，后续调整才有上下文（"上次说的博物馆"有指代）。
-            // 踩坑：必须显式传 CONVERSATION_ID——不传会落到 Advisor 的"default"桶，
-            // 内存版时代不可见，状态外置到 Redis 后才现形（外置存储的可观测性红利）
-            memoryChatClient.prompt()
-                    .user("（用户刚生成了" + destination + days + "日攻略，偏好：" + preferences + "，预算" + budget + "元）")
-                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, cid))
-                    .call()
-                    .content();
-            CostTrackingAdvisor.takeSnapshot();  // 丢弃补写的小账单（日志里已记）
+            // E5 优化：初始上下文【直写】记忆，不走模型。
+            // 旧版过 memoryChatClient 生成一次回复再由 Advisor 落记忆——E3 打点实测这次
+            // "为一句事实调模型"烧了 4 轮工具 + 4161 输入 token + 8.8s（占主生成成本 65%）。
+            // 写记忆不需要生成能力：直接 ChatMemory.add()，模型调用 1→0，成本延迟归零。
+            // 反思：Advisor 的自动记忆机制让人忘了"写记忆"和"调模型"是两件事。
+            sessionService.chatMemory().add(cid, new UserMessage(
+                    "（用户刚生成了" + cleanDest + days + "日攻略，偏好：" + cleanPrefs + "，预算" + budget + "元）"));
+            // 注：E4 复查时发现旧版（走模型补写）此处未脱敏——PII 会随这条上下文发给模型厂商
+            // 且落 Redis 记忆（后续 adjust 还会读回 prompt）。E5 直写版已收口：入口脱敏全路径覆盖
         }
+        httpResponse.setHeader("X-Cache", "MISS");
         if (cost != null) {
             httpResponse.setHeader("X-Travel-Cost", cost.briefAscii());   // 值必须纯 ASCII（见 briefAscii 注释）
         }
@@ -133,6 +161,7 @@ public class TravelController {
         // 改用 BeanOutputConverter（entity 的底层机制）+ 防御性 JSON 提取：
         // 截取第一个 { 到最后一个 }，思考文字/代码块围栏都被剥掉。
         BeanOutputConverter<Itinerary> converter = new BeanOutputConverter<>(Itinerary.class);
+        String sanitizedRequest = piiSanitizer.sanitize(req.request());   // E4：请求体先脱敏再进 prompt
         String raw = memoryChatClient.prompt()
                 .user("""
                         用户对当前行程提出了调整请求：%s
@@ -143,7 +172,7 @@ public class TravelController {
                         请根据调整请求修改行程，输出修改后的【完整】行程（未提及的天保持原样）。
                         用户没明确要改的地方不要动。
                         %s
-                        """.formatted(req.request(), toJson(current), converter.getFormat()))
+                        """.formatted(sanitizedRequest, toJson(current), converter.getFormat()))
                 .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, req.cid()))
                 .call()
                 .content();
@@ -235,7 +264,9 @@ public class TravelController {
     }
 
     /**
-     * 三种输出形态共用的需求 → prompt 构造
+     * 三种输出形态共用的需求 → prompt 构造。
+     * E4：这里是对模型 prompt 的唯一收口点——用户可控输入（目的地/偏好）在此脱敏，
+     * PII 不进 prompt = 不出域发给模型厂商。
      */
     private String buildPrompt(String destination, int days, double budget, String preferences) {
         return """
@@ -249,6 +280,7 @@ public class TravelController {
                 调用 getWeather 拿逐日预报，把该日的天气（温度区间/降雨概率）和对应注意事项
                 （带伞/防晒/穿衣/是否宜户外）写在标题下；预报覆盖不到的行程日按季节常识写。
                 每天结尾给出当日花费估算，最后给整体花费合计和实用贴士。
-                """.formatted(destination, days, budget, preferences);
+                """.formatted(piiSanitizer.sanitize(destination), days, budget,
+                piiSanitizer.sanitize(preferences));
     }
 }

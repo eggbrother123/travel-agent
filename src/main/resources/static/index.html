@@ -301,9 +301,10 @@
                 sk.remove();
                 resultDiv.appendChild(renderItinerary(it));
                 resultDiv.appendChild(buildAdjustBox());
-                // E3：后端 X-Travel-Cost 响应头带回来的账单（token/成本/工具轮次）
+                // E3：后端 X-Travel-Cost 响应头带回来的账单（token/成本/工具轮次）；E5：缓存命中提示
                 const cost = resp.headers.get('X-Travel-Cost');
-                statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s` + (cost ? ` · ${cost}` : '');
+                const hit = resp.headers.get('X-Cache') === 'HIT' ? ' · ⚡缓存命中（0 模型调用）' : '';
+                statusEl.textContent = `完成，耗时 ${((performance.now() - t0) / 1000).toFixed(1)}s` + hit + (cost ? ` · ${cost}` : '');
             } catch (e) {
                 sk.remove();
                 throw e;
