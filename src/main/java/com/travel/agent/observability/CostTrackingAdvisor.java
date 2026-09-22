@@ -39,11 +39,18 @@ public class CostTrackingAdvisor implements CallAdvisor {
     private final MeterRegistry registry;
     private final double inputPricePerMillion;    // ¥ / 百万 token
     private final double outputPricePerMillion;
+    private static final ThreadLocal<CostSnapshot> LAST = new ThreadLocal<>();
 
     /** 请求级快照：Controller 读取后随响应透出（record 序列化友好） */
     public record CostSnapshot(long latencyMs, long promptTokens, long completionTokens,
                                double costCny, int toolCalls) {
 
+        /**-
+         * 踩坑：Tomcat 对含非 ASCII 字符（中文/·/¥）的 header 值会【静默丢弃整个 header】
+         * （实测：同样位置 setHeader，ASCII 值出现、中文值消失，无任何报错日志）。
+         * HTTP 头本质是 ISO-8859-1 字节流，中文内容想进 header 必须 RFC 5987 编码或干脆用 ASCII。
+         */
+        @Deprecated
         public String brief() {
             return latencyMs + "ms · 输入" + promptTokens + "/输出" + completionTokens
                     + " tok · 工具" + toolCalls + "轮 · ≈¥" + String.format("%.4f", costCny);
@@ -60,9 +67,8 @@ public class CostTrackingAdvisor implements CallAdvisor {
             return latencyMs + "ms | in:" + promptTokens + " out:" + completionTokens
                     + " tok | tools:" + toolCalls + " | ~CNY:" + String.format("%.4f", costCny);
         }
-    }
 
-    private static final ThreadLocal<CostSnapshot> LAST = new ThreadLocal<>();
+    }
 
     public CostTrackingAdvisor(MeterRegistry registry,
                                @Value("${travel.cost.input-per-million:2.0}") double inputPricePerMillion,
@@ -85,6 +91,7 @@ public class CostTrackingAdvisor implements CallAdvisor {
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+
         long t0 = System.nanoTime();
         ToolCallTracker.reset();
 
@@ -112,10 +119,14 @@ public class CostTrackingAdvisor implements CallAdvisor {
         // 2) Micrometer 指标（Prometheus 可抓）
         registry.counter("travel.tokens", "type", "input").increment(promptTokens);
         registry.counter("travel.tokens", "type", "output").increment(completionTokens);
-        DistributionSummary.builder("travel.cost.cny")
-                .baseUnit("cny").register(registry).record(cost);
+        DistributionSummary
+                .builder("travel.cost.cny")
+                .baseUnit("cny")
+                .register(registry)
+                .record(cost);
         Timer.builder("travel.request.duration")
-                .register(registry).record(latencyMs, TimeUnit.MILLISECONDS);
+                .register(registry)
+                .record(latencyMs, TimeUnit.MILLISECONDS);
 
         // 3) 请求级快照（Controller 透出用）
         LAST.set(new CostSnapshot(latencyMs, promptTokens, completionTokens, cost, toolCalls));

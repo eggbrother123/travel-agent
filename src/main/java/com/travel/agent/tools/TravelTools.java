@@ -1,5 +1,6 @@
 package com.travel.agent.tools;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.travel.agent.observability.ToolCallTracker;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.tool.annotation.Tool;
@@ -8,6 +9,11 @@ import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.stereotype.Component;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -91,23 +97,23 @@ public class TravelTools {
         System.out.println(">>> [工具] getWeather city=" + city);
         tracker.record("getWeather");
         String name = city.trim();
-        String en = CITY_TO_EN.get(name);
+        String enName = CITY_TO_EN.get(name);
 
         // 真实 API（英文城市名才认，映射表没有的直接试原名——部分英文城市模型会传英文）
-        if (en != null || name.matches("[a-zA-Z ]+")) {
+        if (enName != null || name.matches("[a-zA-Z ]+")) {
             try {
-                String url = "https://wttr.in/" + (en != null ? en : name.replace(" ", "+"))
+                String url = "https://wttr.in/" + (enName != null ? enName : name.replace(" ", "+"))
                         + "?format=j1&lang=zh";
-                String json = java.net.http.HttpClient.newBuilder()
-                        .connectTimeout(java.time.Duration.ofSeconds(5))
+                String json = HttpClient.newBuilder()
+                        .connectTimeout(Duration.ofSeconds(5))
                         .build()
-                        .send(java.net.http.HttpRequest.newBuilder()
-                                        .uri(java.net.URI.create(url))
-                                        .timeout(java.time.Duration.ofSeconds(8))
+                        .send(HttpRequest.newBuilder()
+                                        .uri(URI.create(url))
+                                        .timeout(Duration.ofSeconds(8))
                                         .GET().build(),
-                                java.net.http.HttpResponse.BodyHandlers.ofString())
+                                HttpResponse.BodyHandlers.ofString())
                         .body();
-                var root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
+                var root = new ObjectMapper().readTree(json);
 
                 StringBuilder sb = new StringBuilder();
                 // 当前实况
@@ -124,7 +130,9 @@ public class TravelTools {
                 var days = root.path("weather");
                 int idx = 0;
                 for (var d : days) {
-                    if (idx++ >= 3) break;
+                    if (idx++ >= 3) {
+                        break;
+                    }
                     int maxRain = 0;
                     for (var h : d.path("hourly")) {
                         maxRain = Math.max(maxRain, h.path("chanceofrain").asInt(0));
