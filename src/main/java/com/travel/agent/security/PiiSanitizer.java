@@ -3,6 +3,7 @@ package com.travel.agent.security;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Component;
 
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,7 +63,7 @@ public class PiiSanitizer {
     }
 
     /** 单个规则执行 + 审计（类型计数；绝不记原文） */
-    private String mask(String input, Pattern pattern, java.util.function.Function<Matcher, String> replacer, String type) {
+    private String mask(String input, Pattern pattern, Function<Matcher, String> replacer, String type) {
         Matcher m = pattern.matcher(input);
         StringBuilder sb = new StringBuilder();
         int hits = 0;

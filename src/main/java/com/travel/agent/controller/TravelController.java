@@ -1,5 +1,6 @@
 package com.travel.agent.controller;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.travel.agent.domain.Itinerary;
 import com.travel.agent.observability.CostTrackingAdvisor;
 import com.travel.agent.security.PiiSanitizer;
@@ -19,6 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * 攻略生成接口（M1~M4 演进）：
@@ -81,11 +83,11 @@ public class TravelController {
         String cleanPrefs = piiSanitizer.sanitize(preferences);
 
         // E5：缓存直达——相同参数 TTL 内不调模型。命中也绑定会话（adjust 才有状态），这些操作零模型调用
-        var cached = generationCache.get(cleanDest, days, budget, cleanPrefs);
+        Optional<Itinerary> cached = generationCache.get(cleanDest, days, budget, cleanPrefs);
         if (cached.isPresent()) {
             if (cid != null && !cid.isBlank()) {
                 sessionService.saveItinerary(cid, cached.get());
-                sessionService.chatMemory().add(cid, new UserMessage(
+                sessionService.getChatMemory().add(cid, new UserMessage(
                         "（用户刚生成了" + cleanDest + days + "日攻略，偏好：" + cleanPrefs + "，预算" + budget + "元）"));
             }
             httpResponse.setHeader("X-Cache", "HIT");
@@ -114,7 +116,7 @@ public class TravelController {
             // "为一句事实调模型"烧了 4 轮工具 + 4161 输入 token + 8.8s（占主生成成本 65%）。
             // 写记忆不需要生成能力：直接 ChatMemory.add()，模型调用 1→0，成本延迟归零。
             // 反思：Advisor 的自动记忆机制让人忘了"写记忆"和"调模型"是两件事。
-            sessionService.chatMemory().add(cid, new UserMessage(
+            sessionService.getChatMemory().add(cid, new UserMessage(
                     "（用户刚生成了" + cleanDest + days + "日攻略，偏好：" + cleanPrefs + "，预算" + budget + "元）"));
             // 注：E4 复查时发现旧版（走模型补写）此处未脱敏——PII 会随这条上下文发给模型厂商
             // 且落 Redis 记忆（后续 adjust 还会读回 prompt）。E5 直写版已收口：入口脱敏全路径覆盖
@@ -257,7 +259,7 @@ public class TravelController {
      */
     private String toJson(Itinerary it) {
         try {
-            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(it);
+            return new ObjectMapper().writeValueAsString(it);
         } catch (Exception e) {
             throw new IllegalStateException("行程序列化失败", e);
         }

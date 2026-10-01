@@ -27,7 +27,7 @@ public class ItinerarySessionService {
         this.itineraryStore = itineraryStore;
     }
 
-    public ChatMemory chatMemory() {
+    public ChatMemory getChatMemory() {
         return chatMemory;
     }
 
